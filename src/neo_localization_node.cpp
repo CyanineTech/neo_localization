@@ -51,6 +51,7 @@ public:
     m_node_handle.param<std::string>("base_frame", m_base_frame, "base_link");
     m_node_handle.param<std::string>("odom_frame", m_odom_frame, "odom");
     m_node_handle.param<std::string>("map_frame", m_map_frame, "map");
+    m_node_handle.param<std::string>("odom_pub_frame", m_odom_pub_frame, "odom_neo");
 
     m_node_handle.param("map_size", m_map_size, 1000);
     m_node_handle.param("map_downscale", m_map_downscale, 0);
@@ -722,7 +723,7 @@ private:
   bool m_broadcast_tf = false;
   std::string m_base_frame;
   std::string m_odom_frame;
-  std::string m_odom_pub_frame = "odom_neo";
+  std::string m_odom_pub_frame;
   std::string m_map_frame;
 
   int m_map_size = 0;
