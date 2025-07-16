@@ -19,7 +19,19 @@ find_package(catkin REQUIRED
 			sensor_msgs
 			geometry_msgs
             neo_common
+            message_generation
+
         )
+
+add_message_files(
+  FILES
+  LocalizationStats.msg
+)
+
+generate_messages(
+  DEPENDENCIES
+  std_msgs
+)
 
 include_directories(
     include
@@ -35,11 +47,18 @@ catkin_package(
 		sensor_msgs
 		geometry_msgs
 		neo_common
+        std_msgs
+        message_runtime
 )
 
 add_executable(neo_localization_node src/neo_localization_node.cpp)
-add_dependencies(neo_localization_node ${catkin_EXPORTED_TARGETS})
-target_link_libraries(neo_localization_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_LIBRARIES})
+# add_dependencies(neo_localization_node ${catkin_EXPORTED_TARGETS})
+add_dependencies(neo_localization_node 
+    ${catkin_EXPORTED_TARGETS}
+    ${PROJECT_NAME}_generate_messages_cpp  
+    ${${PROJECT_NAME}_EXPORTED_TARGETS}
+)
+target_link_libraries(neo_localization_node  ${catkin_LIBRARIES})
 
 install(TARGETS neo_localization_node
        ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
@@ -49,4 +68,8 @@ install(TARGETS neo_localization_node
 
 install(DIRECTORY include/${PROJECT_NAME}/
   DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
+)
+
+install(FILES LocalizationStats.msg
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/msg
 )
