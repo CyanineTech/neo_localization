@@ -13,7 +13,7 @@
 #include <ros/ros.h>
 #include <tf/transform_datatypes.h>
 #include <nav_msgs/OccupancyGrid.h>
-
+#include <neo_common/Matrix.h>
 
 /*
  * Converts ROS 3D Transform to a 2.5D matrix.
