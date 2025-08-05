@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- 记录LocalizationStats消息到rosbag -->
+  <node pkg="rosbag" type="record" name="rosbag_record_localization"
+       args="-o $(find neo_localization)/bags/localization_stats_$(env CT_ROBOT_NAME)_$(env CT_MAP)
+             /neo_localization_node/localization_stats"
+       output="screen" />
+</launch>
