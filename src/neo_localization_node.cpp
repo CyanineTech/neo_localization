@@ -28,6 +28,7 @@
 #include <random>
 #include <thread>
 
+#include <neo_localization/LocalizationStats.h>
 /*
  * Coordinate systems:
  * - Sensor in [meters, rad], aka. "laserX"
@@ -76,7 +77,7 @@ public:
     m_node_handle.param("map_update_rate", m_map_update_rate, 0.5);
     m_node_handle.param("transform_timeout", m_transform_timeout, 0.2);
 
-    // Read initial pose parameters
+		// Read initial pose parameters
     double initial_pose_x, initial_pose_y, initial_pose_a;
     bool has_initial_x =
         m_node_handle.getParam("initial_pose_x", initial_pose_x);
@@ -102,7 +103,7 @@ public:
     m_sub_pose_estimate = m_node_handle.subscribe(
         "/initialpose", 1, &NeoLocalizationNode::pose_callback, this);
 
-    m_pub_map_tile =
+		m_pub_map_tile =
         m_node_handle.advertise<nav_msgs::OccupancyGrid>("/map_tile", 1);
     m_pub_loc_pose =
         m_node_handle.advertise<geometry_msgs::PoseWithCovarianceStamped>(
@@ -112,6 +113,8 @@ public:
             "/map_pose", 10);
     m_pub_pose_array =
         m_node_handle.advertise<geometry_msgs::PoseArray>("/particlecloud", 10);
+
+		m_pub_stats = m_node_handle.advertise<neo_localization::LocalizationStats>("localization_stats", 1);
 
     m_loc_update_timer = m_node_handle.createTimer(
         ros::Rate(m_loc_update_rate), &NeoLocalizationNode::loc_update, this);
@@ -445,6 +448,19 @@ protected:
 
     // clear scan buffer
     m_scan_buffer.clear();
+
+		//发布自定义消息
+		neo_localization::LocalizationStats stats_msg;
+		stats_msg.header.stamp = ros::Time::now();
+		stats_msg.header.frame_id = m_map_frame;
+		stats_msg.score = best_score;
+		stats_msg.grad_uvw[0] = grad_std_uvw[0];
+		stats_msg.grad_uvw[1] = grad_std_uvw[1];
+		stats_msg.grad_uvw[2] = grad_std_uvw[2];
+		stats_msg.std_xy = m_sample_std_xy;
+		stats_msg.std_yaw = m_sample_std_yaw;
+		stats_msg.mode = mode;
+		m_pub_stats.publish(stats_msg);
   }
 
   /*
@@ -710,6 +726,7 @@ private:
   ros::Publisher m_pub_loc_pose;
   ros::Publisher m_pub_loc_pose_2;
   ros::Publisher m_pub_pose_array;
+	ros::Publisher m_pub_stats;
 
   ros::Subscriber m_sub_map_topic;
   ros::Subscriber m_sub_scan_topic;
