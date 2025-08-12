@@ -29,6 +29,66 @@
 #include <thread>
 
 #include <neo_localization/LocalizationStats.h>
+
+class KalmanFilter {
+public:
+  KalmanFilter(double q, double r, double init=0.0, double p0=1.0)
+    : Q(q), R(r), X(init), P(p0), initialized(false), last_update_time(ros::Time(0)), outlier_threshold(5.0), min_P(1e-6) {}
+
+  // 设置过程噪声和观测噪声
+  void setParams(double q, double r) { Q = q; R = r; }
+  // 设置异常观测抑制阈值（单位：sigma）
+  void setOutlierThreshold(double th) { outlier_threshold = th; }
+  // 设置最小协方差
+  void setMinP(double p) { min_P = p; }
+
+  // 滤波主入口
+  double update(double measurement, ros::Time stamp = ros::Time::now()) {
+    if (!initialized) {
+      X = measurement;
+      P = 1.0;
+      initialized = true;
+      last_update_time = stamp;
+      return X;
+    }
+    // 时间相关过程噪声自适应（可选）
+    double dt = (stamp - last_update_time).toSec();
+    last_update_time = stamp;
+    double Q_eff = Q * (dt > 0.0 ? dt : 1.0);
+    // 预测
+    P = P + Q_eff;
+    // 异常观测抑制（如观测偏离当前估计过多则忽略）
+    double innovation = measurement - X;
+    double S = P + R;
+    double sigma = sqrt(S);
+    if (fabs(innovation) > outlier_threshold * sigma) {
+      // 观测为离群点，直接返回预测值
+      return X;
+    }
+    // 更新
+    double K = P / S;
+    X = X + K * innovation;
+    P = (1 - K) * P;
+    if (P < min_P) P = min_P;
+    return X;
+  }
+  void reset(double init) {
+    X = init;
+    P = 1.0;
+    initialized = false;
+    last_update_time = ros::Time(0);
+  }
+  double get() const { return X; }
+  double getCov() const { return P; }
+  bool isInitialized() const { return initialized; }
+private:
+  double Q, R, X, P;
+  bool initialized;
+  ros::Time last_update_time;
+  double outlier_threshold;
+  double min_P;
+};
+
 /*
  * Coordinate systems:
  * - Sensor in [meters, rad], aka. "laserX"
@@ -44,7 +104,12 @@
 class NeoLocalizationNode {
 public:
   NeoLocalizationNode()
-      : m_node_handle("~") // Change to private node handle
+      : m_node_handle("~"),
+        kf_score(0.001, 0.01, 0.55),
+        kf_uvw0(0.001, 0.01, 0.4),
+        kf_uvw1(0.001, 0.01, 0.25),
+        kf_stdxy(0.0001, 0.001, 0.025),
+        kf_stdyaw(0.0001, 0.001, 0.025)
   {
     m_node_handle.param("broadcast_tf", m_broadcast_tf, true);
 
@@ -115,6 +180,7 @@ public:
         m_node_handle.advertise<geometry_msgs::PoseArray>("/particlecloud", 10);
 
 		m_pub_stats = m_node_handle.advertise<neo_localization::LocalizationStats>("localization_stats", 1);
+    m_pub_stats_filtered = m_node_handle.advertise<neo_localization::LocalizationStats>("localization_stats_filtered", 1);
 
     m_loc_update_timer = m_node_handle.createTimer(
         ros::Rate(m_loc_update_rate), &NeoLocalizationNode::loc_update, this);
@@ -201,7 +267,6 @@ protected:
 
   void loc_update(const ros::TimerEvent &event) {
     std::lock_guard<std::mutex> lock(m_node_mutex);
-
     if (!m_map || m_scan_buffer.empty()) {
       return;
     }
@@ -449,18 +514,39 @@ protected:
     // clear scan buffer
     m_scan_buffer.clear();
 
-		//发布自定义消息
-		neo_localization::LocalizationStats stats_msg;
-		stats_msg.header.stamp = ros::Time::now();
-		stats_msg.header.frame_id = m_map_frame;
-		stats_msg.score = best_score;
-		stats_msg.grad_uvw[0] = grad_std_uvw[0];
-		stats_msg.grad_uvw[1] = grad_std_uvw[1];
-		stats_msg.grad_uvw[2] = grad_std_uvw[2];
-		stats_msg.std_xy = m_sample_std_xy;
-		stats_msg.std_yaw = m_sample_std_yaw;
-		stats_msg.mode = mode;
-		m_pub_stats.publish(stats_msg);
+    // 卡尔曼滤波处理
+    double filtered_score = kf_score.update(best_score);
+    double filtered_uvw0 = kf_uvw0.update(grad_std_uvw[0]);
+    double filtered_uvw1 = kf_uvw1.update(grad_std_uvw[1]);
+    double filtered_stdxy = kf_stdxy.update(m_sample_std_xy);
+    double filtered_stdyaw = kf_stdyaw.update(m_sample_std_yaw);
+
+    // 发布自定义消息（原始）
+    neo_localization::LocalizationStats stats_msg;
+    stats_msg.header.stamp = ros::Time::now();
+    stats_msg.header.frame_id = m_map_frame;
+    stats_msg.score = best_score;
+    stats_msg.grad_uvw[0] = grad_std_uvw[0];
+    stats_msg.grad_uvw[1] = grad_std_uvw[1];
+    stats_msg.grad_uvw[2] = grad_std_uvw[2];
+    stats_msg.std_xy = m_sample_std_xy;
+    stats_msg.std_yaw = m_sample_std_yaw;
+    stats_msg.mode = mode;
+    m_pub_stats.publish(stats_msg);
+
+    // 发布滤波后的消息（区分topic）
+    neo_localization::LocalizationStats filtered_msg = stats_msg;
+    filtered_msg.score = filtered_score;
+    filtered_msg.grad_uvw[0] = filtered_uvw0;
+    filtered_msg.grad_uvw[1] = filtered_uvw1;
+    filtered_msg.std_xy = filtered_stdxy;
+    filtered_msg.std_yaw = filtered_stdyaw;
+    m_pub_stats_filtered.publish(filtered_msg);
+
+    // 优化异常检测逻辑
+    if(filtered_score < 0.4 || filtered_uvw0 < 0.2 || filtered_uvw1 < 0.1) {
+      ROS_WARN_THROTTLE(5.0, "[KF] 定位异常: score=%.2f, uvw0=%.2f, uvw1=%.2f", filtered_score, filtered_uvw0, filtered_uvw1);
+    }
   }
 
   /*
@@ -727,6 +813,7 @@ private:
   ros::Publisher m_pub_loc_pose_2;
   ros::Publisher m_pub_pose_array;
 	ros::Publisher m_pub_stats;
+  ros::Publisher m_pub_stats_filtered;
 
   ros::Subscriber m_sub_map_topic;
   ros::Subscriber m_sub_scan_topic;
@@ -783,6 +870,12 @@ private:
   Solver m_solver;
   std::mt19937 m_generator;
   std::thread m_map_update_thread;
+
+  KalmanFilter kf_score;
+  KalmanFilter kf_uvw0;
+  KalmanFilter kf_uvw1;
+  KalmanFilter kf_stdxy;
+  KalmanFilter kf_stdyaw;
 };
 
 int main(int argc, char **argv) {
