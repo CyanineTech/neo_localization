@@ -142,21 +142,15 @@ public:
     m_node_handle.param("map_update_rate", m_map_update_rate, 0.5);
     m_node_handle.param("transform_timeout", m_transform_timeout, 0.2);
 
-    // 风险评估参数（可通过参数服务器调整）
-    m_node_handle.param("warn_frames", m_warn_frames, 5);
-    m_node_handle.param("error_frames", m_error_frames, 15);
+    // 风险评估参数
+    m_node_handle.param("error_frames", m_error_frames, 8);
     m_node_handle.param("clear_frames", m_clear_frames, 10);
 
-    m_node_handle.param("th_score_warn", m_th_score_warn, 0.30);
-    m_node_handle.param("th_score_err", m_th_score_err, 0.20);
-    m_node_handle.param("th_uvw0_warn", m_th_uvw0_warn, 0.20);
-    m_node_handle.param("th_uvw0_err", m_th_uvw0_err, 0.10);
-    m_node_handle.param("th_uvw1_warn", m_th_uvw1_warn, 0.10);
-    m_node_handle.param("th_uvw1_err", m_th_uvw1_err, 0.05);
-    m_node_handle.param("th_stdxy_warn", m_th_stdxy_warn, 0.30);
-    m_node_handle.param("th_stdxy_err", m_th_stdxy_err, 0.50);
-    m_node_handle.param("th_stdyaw_warn", m_th_stdyaw_warn, 0.20);
-    m_node_handle.param("th_stdyaw_err", m_th_stdyaw_err, 0.35);
+    m_node_handle.param("th_score_err", m_th_score_err, 0.25);
+    m_node_handle.param("th_uvw0_err", m_th_uvw0_err, 0.15);
+    m_node_handle.param("th_uvw1_err", m_th_uvw1_err, 0.08);
+    m_node_handle.param("th_stdxy_err", m_th_stdxy_err, 0.20);
+    m_node_handle.param("th_stdyaw_err", m_th_stdyaw_err, 0.20);
 
     m_node_handle.param("w_score", m_w_score, 0.4);
     m_node_handle.param("w_uvw0", m_w_uvw0, 0.2);
@@ -164,8 +158,7 @@ public:
     m_node_handle.param("w_stdxy", m_w_stdxy, 0.1);
     m_node_handle.param("w_stdyaw", m_w_stdyaw, 0.1);
 
-    m_node_handle.param("risk_warn", m_risk_warn, 0.4);
-    m_node_handle.param("risk_err", m_risk_err, 0.7);
+    m_node_handle.param("risk_err", m_risk_err, 0.6);
 
 		// Read initial pose parameters
     double initial_pose_x, initial_pose_y, initial_pose_a;
@@ -569,11 +562,11 @@ protected:
 
     // 1) 指标归一化并计算风险分：分数低、梯度低、方差大都提高风险
     auto clamp01 = [](double x){ return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x); };
-    double r_score = clamp01((m_th_score_warn - filtered_score) / std::max(1e-6, m_th_score_warn));
-    double r_uvw0  = clamp01((m_th_uvw0_warn  - filtered_uvw0) / std::max(1e-6, m_th_uvw0_warn));
-    double r_uvw1  = clamp01((m_th_uvw1_warn  - filtered_uvw1) / std::max(1e-6, m_th_uvw1_warn));
-    double r_stdxy = clamp01((filtered_stdxy   - m_th_stdxy_warn) / std::max(1e-6, m_th_stdxy_warn));
-    double r_stdyaw= clamp01((filtered_stdyaw  - m_th_stdyaw_warn)/ std::max(1e-6, m_th_stdyaw_warn));
+    double r_score = clamp01((m_th_score_err - filtered_score) / std::max(1e-6, m_th_score_err));
+    double r_uvw0  = clamp01((m_th_uvw0_err  - filtered_uvw0) / std::max(1e-6, m_th_uvw0_err));
+    double r_uvw1  = clamp01((m_th_uvw1_err  - filtered_uvw1) / std::max(1e-6, m_th_uvw1_err));
+    double r_stdxy = clamp01((filtered_stdxy   - m_th_stdxy_err) / std::max(1e-6, m_th_stdxy_err));
+    double r_stdyaw= clamp01((filtered_stdyaw  - m_th_stdyaw_err) / std::max(1e-6, m_th_stdyaw_err));
 
     double risk = m_w_score*r_score + m_w_uvw0*r_uvw0 + m_w_uvw1*r_uvw1 + m_w_stdxy*r_stdxy + m_w_stdyaw*r_stdyaw;
 
@@ -582,20 +575,17 @@ protected:
                    || (filtered_stdxy > m_th_stdxy_err) || (filtered_stdyaw > m_th_stdyaw_err);
     if (hard_error) risk = std::max(risk, m_risk_err);
 
-    // 3) 连续帧状态机，避免单帧抖动
-    int level_val = 1; // 1=正常, 2=警告, 3=错误
+    // 3) 连续帧状态机
+    int level_val = 1; // 1=正常, 3=错误
     if (risk >= m_risk_err) {
-      m_err_count++; m_warn_count = 0; m_clear_count = 0;
-    } else if (risk >= m_risk_warn) {
-      m_warn_count++; m_err_count = 0; m_clear_count = 0;
+      m_err_count++; m_clear_count = 0;
     } else {
-      m_clear_count++; m_warn_count = 0; m_err_count = 0;
+      m_clear_count++; m_err_count = 0;
     }
     if (m_err_count >= m_error_frames) level_val = 3;
-    else if (m_warn_count >= m_warn_frames) level_val = 2;
     else if (m_clear_count >= m_clear_frames) level_val = 1;
 
-    filtered_msg.abnormal = (level_val != 1);
+    filtered_msg.abnormal = (level_val == 3); 
     filtered_msg.level = static_cast<uint8_t>(level_val);
 
     char buf2[160];
@@ -603,13 +593,11 @@ protected:
       snprintf(buf2, sizeof(buf2), "[KF] 定位错误: risk=%.2f (score=%.2f, uvw0=%.2f, uvw1=%.2f, std_xy=%.2f, std_yaw=%.2f)",
                risk, filtered_score, filtered_uvw0, filtered_uvw1, filtered_stdxy, filtered_stdyaw);
       filtered_msg.message = std::string(buf2);
-    } else if (level_val == 2) {
-      snprintf(buf2, sizeof(buf2), "[KF] 定位警告: risk=%.2f (score=%.2f, uvw0=%.2f, uvw1=%.2f, std_xy=%.2f, std_yaw=%.2f)",
-               risk, filtered_score, filtered_uvw0, filtered_uvw1, filtered_stdxy, filtered_stdyaw);
-      filtered_msg.message = std::string(buf2);
     } else {
       filtered_msg.message = "";
     }
+
+    filtered_msg.risk    = static_cast<float>(risk);
 
     m_pub_stats_filtered.publish(filtered_msg);
   }
@@ -917,23 +905,21 @@ private:
   double m_transform_timeout = 0;
 
   // 连续帧状态机计数
-  int m_warn_frames = 5;
-  int m_error_frames = 15;
+  int m_error_frames = 8;  
   int m_clear_frames = 10;
-  int m_warn_count = 0;
   int m_err_count = 0;
   int m_clear_count = 0;
 
   // 阈值参数
-  double m_th_score_warn = 0.30, m_th_score_err = 0.20;
-  double m_th_uvw0_warn = 0.20, m_th_uvw0_err = 0.10;
-  double m_th_uvw1_warn = 0.10, m_th_uvw1_err = 0.05;
-  double m_th_stdxy_warn = 0.30, m_th_stdxy_err = 0.50;
-  double m_th_stdyaw_warn = 0.20, m_th_stdyaw_err = 0.35;
+  double m_th_score_err = 0.25; 
+  double m_th_uvw0_err = 0.15;  
+  double m_th_uvw1_err = 0.08; 
+  double m_th_stdxy_err = 0.20; 
+  double m_th_stdyaw_err = 0.20; 
 
   // 指标权重与风险阈值
   double m_w_score = 0.4, m_w_uvw0 = 0.2, m_w_uvw1 = 0.2, m_w_stdxy = 0.1, m_w_stdyaw = 0.1;
-  double m_risk_warn = 0.4, m_risk_err = 0.7;
+  double m_risk_err = 0.6;
 
   ros::Time m_offset_time;
   double m_offset_x = 0;       // current x offset between odom and map
