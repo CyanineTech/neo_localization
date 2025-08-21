@@ -143,20 +143,16 @@ public:
     m_node_handle.param("transform_timeout", m_transform_timeout, 0.2);
 
     // 风险评估参数（可通过参数服务器调整）
-    m_node_handle.param("warn_frames", m_warn_frames, 5);
-    m_node_handle.param("error_frames", m_error_frames, 15);
-    m_node_handle.param("clear_frames", m_clear_frames, 10);
-
-    m_node_handle.param("th_score_warn", m_th_score_warn, 0.30);
-    m_node_handle.param("th_score_err", m_th_score_err, 0.20);
-    m_node_handle.param("th_uvw0_warn", m_th_uvw0_warn, 0.20);
+    m_node_handle.param("th_score_warn", m_th_score_warn, 0.35);
+    m_node_handle.param("th_score_err", m_th_score_err, 0.15);
+    m_node_handle.param("th_uvw0_warn", m_th_uvw0_warn, 0.25);
     m_node_handle.param("th_uvw0_err", m_th_uvw0_err, 0.10);
-    m_node_handle.param("th_uvw1_warn", m_th_uvw1_warn, 0.10);
-    m_node_handle.param("th_uvw1_err", m_th_uvw1_err, 0.05);
-    m_node_handle.param("th_stdxy_warn", m_th_stdxy_warn, 0.30);
-    m_node_handle.param("th_stdxy_err", m_th_stdxy_err, 0.50);
-    m_node_handle.param("th_stdyaw_warn", m_th_stdyaw_warn, 0.20);
-    m_node_handle.param("th_stdyaw_err", m_th_stdyaw_err, 0.35);
+    m_node_handle.param("th_uvw1_warn", m_th_uvw1_warn, 0.20);
+    m_node_handle.param("th_uvw1_err", m_th_uvw1_err, 0.08);
+    m_node_handle.param("th_stdxy_warn", m_th_stdxy_warn, 0.15);
+    m_node_handle.param("th_stdxy_err", m_th_stdxy_err, 0.30);
+    m_node_handle.param("th_stdyaw_warn", m_th_stdyaw_warn, 0.15);
+    m_node_handle.param("th_stdyaw_err", m_th_stdyaw_err, 0.30);
 
     m_node_handle.param("w_score", m_w_score, 0.4);
     m_node_handle.param("w_uvw0", m_w_uvw0, 0.2);
@@ -164,8 +160,15 @@ public:
     m_node_handle.param("w_stdxy", m_w_stdxy, 0.1);
     m_node_handle.param("w_stdyaw", m_w_stdyaw, 0.1);
 
-    m_node_handle.param("risk_warn", m_risk_warn, 0.4);
-    m_node_handle.param("risk_err", m_risk_err, 0.7);
+    m_node_handle.param("risk_clear", m_risk_clear, 0.20);
+    m_node_handle.param("risk_warn", m_risk_warn, 0.3);
+    m_node_handle.param("risk_err", m_risk_err, 0.6);
+
+    // 证据积分参数
+    m_node_handle.param("evidence_up",   m_e_up,   0.20); // 风险高于warn时的增长速率
+    m_node_handle.param("evidence_down", m_e_down, 0.05); // 风险低于warn时的衰减速率
+    m_node_handle.param("evidence_warn", m_e_warn, 0.30);  // WARN阈值（证据）
+    m_node_handle.param("evidence_err",  m_e_err,  0.70);  // ERROR阈值（证据）
 
 		// Read initial pose parameters
     double initial_pose_x, initial_pose_y, initial_pose_a;
@@ -546,7 +549,7 @@ protected:
     double filtered_stdxy = kf_stdxy.update(m_sample_std_xy);
     double filtered_stdyaw = kf_stdyaw.update(m_sample_std_yaw);
 
-    // 发布自定义消息（原始）
+    // 发布自定义消息
     neo_localization::LocalizationStats stats_msg;
     stats_msg.header.stamp = ros::Time::now();
     stats_msg.header.frame_id = m_map_frame;
@@ -559,7 +562,7 @@ protected:
     stats_msg.mode = mode;
     m_pub_stats.publish(stats_msg);
 
-    // 发布滤波后的消息（区分topic）
+    // 发布滤波后的消息
     neo_localization::LocalizationStats filtered_msg = stats_msg;
     filtered_msg.score = filtered_score;
     filtered_msg.grad_uvw[0] = filtered_uvw0;
@@ -577,23 +580,20 @@ protected:
 
     double risk = m_w_score*r_score + m_w_uvw0*r_uvw0 + m_w_uvw1*r_uvw1 + m_w_stdxy*r_stdxy + m_w_stdyaw*r_stdyaw;
 
-    // 2) 基于更严格阈值的硬条件判定（任一达到严重阈值，显著加权）
+    // 2) 基于更严格阈值的硬条件判定
     bool hard_error = (filtered_score < m_th_score_err) || (filtered_uvw0 < m_th_uvw0_err) || (filtered_uvw1 < m_th_uvw1_err)
                    || (filtered_stdxy > m_th_stdxy_err) || (filtered_stdyaw > m_th_stdyaw_err);
     if (hard_error) risk = std::max(risk, m_risk_err);
 
-    // 3) 连续帧状态机，避免单帧抖动
+    // 3) leaky integrator
+    const double over  = std::max(0.0, risk - m_risk_clear) / std::max(1e-6, m_risk_err - m_risk_clear);
+    const double under = std::max(0.0, m_risk_clear - risk) / std::max(1e-6, m_risk_clear);
+    m_evidence += m_e_up * over - m_e_down * under;
+    m_evidence = clamp01(m_evidence);
+
     int level_val = 1; // 1=正常, 2=警告, 3=错误
-    if (risk >= m_risk_err) {
-      m_err_count++; m_warn_count = 0; m_clear_count = 0;
-    } else if (risk >= m_risk_warn) {
-      m_warn_count++; m_err_count = 0; m_clear_count = 0;
-    } else {
-      m_clear_count++; m_warn_count = 0; m_err_count = 0;
-    }
-    if (m_err_count >= m_error_frames) level_val = 3;
-    else if (m_warn_count >= m_warn_frames) level_val = 2;
-    else if (m_clear_count >= m_clear_frames) level_val = 1;
+    if (m_evidence >= m_e_err)      level_val = 3;
+    else if (m_evidence >= m_e_warn) level_val = 2;
 
     filtered_msg.abnormal = (level_val != 1);
     filtered_msg.level = static_cast<uint8_t>(level_val);
@@ -610,6 +610,9 @@ protected:
     } else {
       filtered_msg.message = "";
     }
+
+    // 发布风险值
+    filtered_msg.risk = static_cast<float>(risk);
 
     m_pub_stats_filtered.publish(filtered_msg);
   }
@@ -904,9 +907,7 @@ private:
   double m_update_gain = 0;
   double m_confidence_gain = 0;
   double m_min_score = 0;
-  double m_odometry_std_xy = 0;  // odometry xy error in meter per meter driven
-  double m_odometry_std_yaw = 0; // odometry yaw error in rad per rad rotated
-  double m_min_sample_std_xy = 0;
+  double m_odometry_std_xy = 0;  double m_odometry_std_yaw = 0;  double m_min_sample_std_xy = 0;
   double m_min_sample_std_yaw = 0;
   double m_max_sample_std_xy = 0;
   double m_max_sample_std_yaw = 0;
@@ -915,39 +916,32 @@ private:
   double m_loc_update_rate = 0;
   double m_map_update_rate = 0;
   double m_transform_timeout = 0;
-
-  // 连续帧状态机计数
-  int m_warn_frames = 5;
-  int m_error_frames = 15;
-  int m_clear_frames = 10;
-  int m_warn_count = 0;
-  int m_err_count = 0;
-  int m_clear_count = 0;
-
+  
   // 阈值参数
-  double m_th_score_warn = 0.30, m_th_score_err = 0.20;
-  double m_th_uvw0_warn = 0.20, m_th_uvw0_err = 0.10;
-  double m_th_uvw1_warn = 0.10, m_th_uvw1_err = 0.05;
-  double m_th_stdxy_warn = 0.30, m_th_stdxy_err = 0.50;
-  double m_th_stdyaw_warn = 0.20, m_th_stdyaw_err = 0.35;
+  double m_th_score_warn = 0.35, m_th_score_err = 0.15;
+  double m_th_uvw0_warn = 0.25, m_th_uvw0_err = 0.10;
+  double m_th_uvw1_warn = 0.20, m_th_uvw1_err = 0.08;
+  double m_th_stdxy_warn = 0.15, m_th_stdxy_err = 0.30;
+  double m_th_stdyaw_warn = 0.15, m_th_stdyaw_err = 0.30;
 
   // 指标权重与风险阈值
   double m_w_score = 0.4, m_w_uvw0 = 0.2, m_w_uvw1 = 0.2, m_w_stdxy = 0.1, m_w_stdyaw = 0.1;
-  double m_risk_warn = 0.4, m_risk_err = 0.7;
+  double m_risk_clear = 0.20;
+  double m_risk_warn = 0.3, m_risk_err = 0.6;
+
+  // 证据积分状态与阈值
+  double m_evidence = 0.0;   
+  double m_e_up = 0.20;      // 增长速率
+  double m_e_down = 0.05;    // 衰减速率
+  double m_e_warn = 0.30;     // WARN触发阈值
+  double m_e_err = 0.70;      // ERROR触发阈值
 
   ros::Time m_offset_time;
-  double m_offset_x = 0;       // current x offset between odom and map
-  double m_offset_y = 0;       // current y offset between odom and map
-  double m_offset_yaw = 0;     // current yaw offset between odom and map
-  double m_sample_std_xy = 0;  // current sample spread in xy
-  double m_sample_std_yaw = 0; // current sample spread in yaw
-
+  double m_offset_x = 0;  double m_offset_y = 0;  double m_offset_yaw = 0;  double m_sample_std_xy = 0;  double m_sample_std_yaw = 0;
   Matrix<double, 3, 1> m_last_odom_pose;
   Matrix<double, 4, 4> m_grid_to_map;
   Matrix<double, 4, 4> m_world_to_map;
-  std::shared_ptr<GridMap<float>> m_map;     // map tile
-  nav_msgs::OccupancyGrid::ConstPtr m_world; // whole map
-
+  std::shared_ptr<GridMap<float>> m_map;  nav_msgs::OccupancyGrid::ConstPtr m_world;
   int64_t update_counter = 0;
   std::map<std::string, sensor_msgs::LaserScan::ConstPtr> m_scan_buffer;
 
