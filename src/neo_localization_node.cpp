@@ -31,8 +31,6 @@
 #include <random>
 #include <thread>
 
-#include <neo_localization/LocalizationStats.h>
-
 class KalmanFilter {
 public:
   KalmanFilter(double q, double r, double init=0.0, double p0=1.0)
@@ -903,7 +901,7 @@ protected:
     std::lock_guard<std::mutex> lock(m_node_mutex);
     m_evidence = 0.0;
     m_last_level = 1;
-    // 注销两个错误码
+    // 注销定位风险错误码 34100003
     if (m_err_client) {
       m_err_client->unregisterErrorMsg(34100003);
     }
