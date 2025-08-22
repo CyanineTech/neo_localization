@@ -9,6 +9,9 @@
 #include <neo_localization/GridMap.h>
 #include <neo_localization/Solver.h>
 #include <neo_localization/Util.h>
+#include <neo_localization/LocalizationStats.h>
+#include "error_monitor/client.h"
+#include <std_srvs/Empty.h>
 
 #include <angles/angles.h>
 #include <geometry_msgs/PoseArray.h>
@@ -214,6 +217,14 @@ public:
         ros::Rate(m_loc_update_rate), &NeoLocalizationNode::loc_update, this);
 
     m_map_update_thread = std::thread(&NeoLocalizationNode::update_loop, this);
+
+    // 初始化错误监控客户端 & 服务
+    try {
+      m_err_client = std::make_shared<cyanine_os::error_monitor::ErrorMonitorClient>("error_monitor");
+    } catch (const std::exception &e) {
+      ROS_WARN_STREAM("NeoLocalizationNode: init error_monitor client failed: " << e.what());
+    }
+    m_srv_fix_mon = m_node_handle.advertiseService("fix_mon", &NeoLocalizationNode::fix_mon_cb, this);
   }
 
   ~NeoLocalizationNode() {
@@ -615,6 +626,23 @@ protected:
     filtered_msg.risk = static_cast<float>(risk);
 
     m_pub_stats_filtered.publish(filtered_msg);
+
+    if (m_err_client) {
+      if (level_val != m_last_level) {
+        if (level_val == 1) {
+          // 恢复正常: 注销34100003
+          m_err_client->unregisterErrorMsg(34100003);
+        } else if (level_val == 2) {
+          // 警告级别: 不上报错误码，仅准备后续切换odom源
+          // 如果之前有错误码，先注销
+          m_err_client->unregisterErrorMsg(34100003);
+        } else if (level_val == 3) {
+          m_err_client->unregisterErrorMsg(34100003);
+          m_err_client->registerErrorMsg(34100003, 1, "localization error");
+        }
+        m_last_level = level_val;
+      }
+    }
   }
 
   /*
@@ -871,6 +899,23 @@ protected:
     }
   }
 
+  bool fix_mon_cb(std_srvs::Empty::Request &, std_srvs::Empty::Response &) {
+    std::lock_guard<std::mutex> lock(m_node_mutex);
+    m_evidence = 0.0;
+    m_last_level = 1;
+    // 注销两个错误码
+    if (m_err_client) {
+      m_err_client->unregisterErrorMsg(34100003);
+    }
+    if (kf_score.isInitialized()) kf_score.reset(0.0);
+    if (kf_uvw0.isInitialized()) kf_uvw0.reset(0.0);
+    if (kf_uvw1.isInitialized()) kf_uvw1.reset(0.0);
+    if (kf_stdxy.isInitialized()) kf_stdxy.reset(0.0);
+    if (kf_stdyaw.isInitialized()) kf_stdyaw.reset(0.0);
+    ROS_INFO("neo_localization fix_mon: reset risk state");
+    return true;
+  }
+
 private:
   std::mutex m_node_mutex;
 
@@ -954,6 +999,11 @@ private:
   KalmanFilter kf_uvw1;
   KalmanFilter kf_stdxy;
   KalmanFilter kf_stdyaw;
+
+  // 错误监控
+  std::shared_ptr<cyanine_os::error_monitor::ErrorMonitorClient> m_err_client;
+  int m_last_level = 1; // 1=正常 2=警告 3=错误
+  ros::ServiceServer m_srv_fix_mon;
 };
 
 int main(int argc, char **argv) {

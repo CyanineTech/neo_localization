@@ -20,7 +20,8 @@ find_package(catkin REQUIRED
 			geometry_msgs
             neo_common
             message_generation
-
+            error_monitor_msgs
+            error_monitor_srvs
         )
 
 add_message_files(
@@ -36,6 +37,7 @@ generate_messages(
 include_directories(
     include
     ${catkin_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/libcyanine/error_monitor/include
 )
 
 catkin_package(
@@ -49,6 +51,8 @@ catkin_package(
 		neo_common
         std_msgs
         message_runtime
+        error_monitor_msgs
+        error_monitor_srvs
 )
 
 add_executable(neo_localization_node src/neo_localization_node.cpp)
