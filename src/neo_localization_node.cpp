@@ -144,15 +144,15 @@ public:
     m_node_handle.param("transform_timeout", m_transform_timeout, 0.2);
 
     // 风险评估参数（可通过参数服务器调整）
-    m_node_handle.param("th_score_warn", m_th_score_warn, 0.40);
+    m_node_handle.param("th_score_warn", m_th_score_warn, 0.45);
     m_node_handle.param("th_score_err", m_th_score_err, 0.20);
-    m_node_handle.param("th_uvw0_warn", m_th_uvw0_warn, 0.18);
+    m_node_handle.param("th_uvw0_warn", m_th_uvw0_warn, 0.20);
     m_node_handle.param("th_uvw0_err", m_th_uvw0_err, 0.10);
-    m_node_handle.param("th_uvw1_warn", m_th_uvw1_warn, 0.12);
+    m_node_handle.param("th_uvw1_warn", m_th_uvw1_warn, 0.15);
     m_node_handle.param("th_uvw1_err", m_th_uvw1_err, 0.08);
-    m_node_handle.param("th_stdxy_warn", m_th_stdxy_warn, 0.15);
+    m_node_handle.param("th_stdxy_warn", m_th_stdxy_warn, 0.20);
     m_node_handle.param("th_stdxy_err", m_th_stdxy_err, 0.30);
-    m_node_handle.param("th_stdyaw_warn", m_th_stdyaw_warn, 0.15);
+    m_node_handle.param("th_stdyaw_warn", m_th_stdyaw_warn, 0.20);
     m_node_handle.param("th_stdyaw_err", m_th_stdyaw_err, 0.30);
 
     m_node_handle.param("w_score", m_w_score, 0.4);
@@ -609,19 +609,18 @@ protected:
 
     char buf2[160];
     if (level_val == 3) {
-      snprintf(buf2, sizeof(buf2), "[KF] 定位错误: risk=%.2f (score=%.2f, uvw0=%.2f, uvw1=%.2f, std_xy=%.2f, std_yaw=%.2f)",
-               risk, filtered_score, filtered_uvw0, filtered_uvw1, filtered_stdxy, filtered_stdyaw);
+      snprintf(buf2, sizeof(buf2), "[KF] 定位错误: risk=%.2f ev=%.2f (score=%.2f, uvw0=%.2f, uvw1=%.2f, std_xy=%.2f, std_yaw=%.2f)",
+               risk, m_evidence, filtered_score, filtered_uvw0, filtered_uvw1, filtered_stdxy, filtered_stdyaw);
       filtered_msg.message = std::string(buf2);
     } else if (level_val == 2) {
-      snprintf(buf2, sizeof(buf2), "[KF] 定位警告: risk=%.2f (score=%.2f, uvw0=%.2f, uvw1=%.2f, std_xy=%.2f, std_yaw=%.2f)",
-               risk, filtered_score, filtered_uvw0, filtered_uvw1, filtered_stdxy, filtered_stdyaw);
+      snprintf(buf2, sizeof(buf2), "[KF] 定位警告: risk=%.2f ev=%.2f (score=%.2f, uvw0=%.2f, uvw1=%.2f, std_xy=%.2f, std_yaw=%.2f)",
+               risk, m_evidence, filtered_score, filtered_uvw0, filtered_uvw1, filtered_stdxy, filtered_stdyaw);
       filtered_msg.message = std::string(buf2);
     } else {
       filtered_msg.message = "";
     }
 
-    // 发布风险值
-    filtered_msg.risk = static_cast<float>(risk);
+    filtered_msg.risk = static_cast<float>(m_evidence);
 
     m_pub_stats_filtered.publish(filtered_msg);
 
@@ -961,11 +960,11 @@ private:
   double m_transform_timeout = 0;
   
   // 阈值参数
-  double m_th_score_warn = 0.40, m_th_score_err = 0.20;
-  double m_th_uvw0_warn = 0.18, m_th_uvw0_err = 0.10;
-  double m_th_uvw1_warn = 0.12, m_th_uvw1_err = 0.08;
-  double m_th_stdxy_warn = 0.15, m_th_stdxy_err = 0.30;
-  double m_th_stdyaw_warn = 0.15, m_th_stdyaw_err = 0.30;
+  double m_th_score_warn = 0.45, m_th_score_err = 0.20;
+  double m_th_uvw0_warn = 0.20, m_th_uvw0_err = 0.10;
+  double m_th_uvw1_warn = 0.15, m_th_uvw1_err = 0.08;
+  double m_th_stdxy_warn = 0.20, m_th_stdxy_err = 0.30;
+  double m_th_stdyaw_warn = 0.20, m_th_stdyaw_err = 0.30;
 
   // 指标权重与风险阈值
   double m_w_score = 0.4, m_w_uvw0 = 0.2, m_w_uvw1 = 0.2, m_w_stdxy = 0.1, m_w_stdyaw = 0.1;
@@ -974,8 +973,8 @@ private:
 
   // 证据积分状态与阈值
   double m_evidence = 0.0;   
-  double m_e_up = 0.20;      // 增长速率
-  double m_e_down = 0.05;    // 衰减速率
+  double m_e_up = 0.25;      // 增长速率
+  double m_e_down = 0.10;    // 衰减速率
   double m_e_warn = 0.30;     // WARN触发阈值
   double m_e_err = 0.70;      // ERROR触发阈值
 
