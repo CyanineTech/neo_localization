@@ -52,8 +52,6 @@ catkin_package(
         neo_common
         std_msgs
         message_runtime
-        error_monitor_msgs
-        error_monitor_srvs
         error_monitor
 )
 
