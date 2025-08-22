@@ -22,6 +22,7 @@ find_package(catkin REQUIRED
             message_generation
             error_monitor_msgs
             error_monitor_srvs
+            error_monitor
         )
 
 add_message_files(
@@ -44,15 +45,16 @@ catkin_package(
     INCLUDE_DIRS include
     CATKIN_DEPENDS
         roscpp
-		tf
-		nav_msgs
-		sensor_msgs
-		geometry_msgs
-		neo_common
+        tf
+        nav_msgs
+        sensor_msgs
+        geometry_msgs
+        neo_common
         std_msgs
         message_runtime
         error_monitor_msgs
         error_monitor_srvs
+        error_monitor
 )
 
 add_executable(neo_localization_node src/neo_localization_node.cpp)
@@ -62,7 +64,7 @@ add_dependencies(neo_localization_node
     ${PROJECT_NAME}_generate_messages_cpp  
     ${${PROJECT_NAME}_EXPORTED_TARGETS}
 )
-target_link_libraries(neo_localization_node  ${catkin_LIBRARIES})
+target_link_libraries(neo_localization_node  ${catkin_LIBRARIES} error_monitor_lib)
 
 install(TARGETS neo_localization_node
        ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
