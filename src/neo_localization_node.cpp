@@ -51,13 +51,13 @@ public:
       last_update_time = stamp;
       return X;
     }
-    // 时间相关过程噪声自适应（可选）
+    // 时间相关过程噪声自适应
     double dt = (stamp - last_update_time).toSec();
     last_update_time = stamp;
     double Q_eff = Q * (dt > 0.0 ? dt : 1.0);
     // 预测
     P = P + Q_eff;
-    // 异常观测抑制（如观测偏离当前估计过多则忽略）
+    // 异常观测抑制
     double innovation = measurement - X;
     double S = P + R;
     double sigma = sqrt(S);
@@ -143,11 +143,11 @@ public:
     m_node_handle.param("transform_timeout", m_transform_timeout, 0.2);
 
     // 风险评估参数（可通过参数服务器调整）
-    m_node_handle.param("th_score_warn", m_th_score_warn, 0.35);
-    m_node_handle.param("th_score_err", m_th_score_err, 0.15);
-    m_node_handle.param("th_uvw0_warn", m_th_uvw0_warn, 0.25);
+    m_node_handle.param("th_score_warn", m_th_score_warn, 0.40);
+    m_node_handle.param("th_score_err", m_th_score_err, 0.20);
+    m_node_handle.param("th_uvw0_warn", m_th_uvw0_warn, 0.18);
     m_node_handle.param("th_uvw0_err", m_th_uvw0_err, 0.10);
-    m_node_handle.param("th_uvw1_warn", m_th_uvw1_warn, 0.20);
+    m_node_handle.param("th_uvw1_warn", m_th_uvw1_warn, 0.12);
     m_node_handle.param("th_uvw1_err", m_th_uvw1_err, 0.08);
     m_node_handle.param("th_stdxy_warn", m_th_stdxy_warn, 0.15);
     m_node_handle.param("th_stdxy_err", m_th_stdxy_err, 0.30);
@@ -918,9 +918,9 @@ private:
   double m_transform_timeout = 0;
   
   // 阈值参数
-  double m_th_score_warn = 0.35, m_th_score_err = 0.15;
-  double m_th_uvw0_warn = 0.25, m_th_uvw0_err = 0.10;
-  double m_th_uvw1_warn = 0.20, m_th_uvw1_err = 0.08;
+  double m_th_score_warn = 0.40, m_th_score_err = 0.20;
+  double m_th_uvw0_warn = 0.18, m_th_uvw0_err = 0.10;
+  double m_th_uvw1_warn = 0.12, m_th_uvw1_err = 0.08;
   double m_th_stdxy_warn = 0.15, m_th_stdxy_err = 0.30;
   double m_th_stdyaw_warn = 0.15, m_th_stdyaw_err = 0.30;
 
