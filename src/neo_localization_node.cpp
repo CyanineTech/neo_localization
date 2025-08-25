@@ -144,32 +144,32 @@ public:
     m_node_handle.param("transform_timeout", m_transform_timeout, 0.2);
 
     // 风险评估参数（可通过参数服务器调整）
-    m_node_handle.param("th_score_warn", m_th_score_warn, 0.45);
-    m_node_handle.param("th_score_err", m_th_score_err, 0.20);
-    m_node_handle.param("th_uvw0_warn", m_th_uvw0_warn, 0.20);
+    m_node_handle.param("th_score_warn", m_th_score_warn, 0.55);
+    m_node_handle.param("th_score_err", m_th_score_err, 0.25);
+    m_node_handle.param("th_uvw0_warn", m_th_uvw0_warn, 0.25);
     m_node_handle.param("th_uvw0_err", m_th_uvw0_err, 0.10);
-    m_node_handle.param("th_uvw1_warn", m_th_uvw1_warn, 0.15);
+    m_node_handle.param("th_uvw1_warn", m_th_uvw1_warn, 0.20);
     m_node_handle.param("th_uvw1_err", m_th_uvw1_err, 0.08);
     m_node_handle.param("th_stdxy_warn", m_th_stdxy_warn, 0.20);
     m_node_handle.param("th_stdxy_err", m_th_stdxy_err, 0.30);
     m_node_handle.param("th_stdyaw_warn", m_th_stdyaw_warn, 0.20);
     m_node_handle.param("th_stdyaw_err", m_th_stdyaw_err, 0.30);
 
-    m_node_handle.param("w_score", m_w_score, 0.4);
-    m_node_handle.param("w_uvw0", m_w_uvw0, 0.2);
-    m_node_handle.param("w_uvw1", m_w_uvw1, 0.2);
-    m_node_handle.param("w_stdxy", m_w_stdxy, 0.1);
-    m_node_handle.param("w_stdyaw", m_w_stdyaw, 0.1);
+    m_node_handle.param("w_score", m_w_score, 0.6);
+    m_node_handle.param("w_uvw0", m_w_uvw0, 0.15);
+    m_node_handle.param("w_uvw1", m_w_uvw1, 0.15);
+    m_node_handle.param("w_stdxy", m_w_stdxy, 0.05);
+    m_node_handle.param("w_stdyaw", m_w_stdyaw, 0.05);
 
     m_node_handle.param("risk_clear", m_risk_clear, 0.20);
     m_node_handle.param("risk_warn", m_risk_warn, 0.3);
     m_node_handle.param("risk_err", m_risk_err, 0.6);
 
     // 证据积分参数
-    m_node_handle.param("evidence_up",   m_e_up,   0.20); // 风险高于warn时的增长速率
-    m_node_handle.param("evidence_down", m_e_down, 0.05); // 风险低于warn时的衰减速率
+    m_node_handle.param("evidence_up",   m_e_up,   0.25); // 风险高于warn时的增长速率
+    m_node_handle.param("evidence_down", m_e_down, 0.10); // 风险低于warn时的衰减速率
     m_node_handle.param("evidence_warn", m_e_warn, 0.30);  // WARN阈值（证据）
-    m_node_handle.param("evidence_err",  m_e_err,  0.70);  // ERROR阈值（证据）
+    m_node_handle.param("evidence_err",  m_e_err,  0.60);  // ERROR阈值（证据）
 
 		// Read initial pose parameters
     double initial_pose_x, initial_pose_y, initial_pose_a;
@@ -960,14 +960,14 @@ private:
   double m_transform_timeout = 0;
   
   // 阈值参数
-  double m_th_score_warn = 0.45, m_th_score_err = 0.20;
-  double m_th_uvw0_warn = 0.20, m_th_uvw0_err = 0.10;
-  double m_th_uvw1_warn = 0.15, m_th_uvw1_err = 0.08;
+  double m_th_score_warn = 0.55, m_th_score_err = 0.25;
+  double m_th_uvw0_warn = 0.25, m_th_uvw0_err = 0.10;
+  double m_th_uvw1_warn = 0.20, m_th_uvw1_err = 0.08;
   double m_th_stdxy_warn = 0.20, m_th_stdxy_err = 0.30;
   double m_th_stdyaw_warn = 0.20, m_th_stdyaw_err = 0.30;
 
   // 指标权重与风险阈值
-  double m_w_score = 0.4, m_w_uvw0 = 0.2, m_w_uvw1 = 0.2, m_w_stdxy = 0.1, m_w_stdyaw = 0.1;
+  double m_w_score = 0.6, m_w_uvw0 = 0.15, m_w_uvw1 = 0.15, m_w_stdxy = 0.05, m_w_stdyaw = 0.05;
   double m_risk_clear = 0.20;
   double m_risk_warn = 0.3, m_risk_err = 0.6;
 
@@ -976,7 +976,7 @@ private:
   double m_e_up = 0.25;      // 增长速率
   double m_e_down = 0.10;    // 衰减速率
   double m_e_warn = 0.30;     // WARN触发阈值
-  double m_e_err = 0.70;      // ERROR触发阈值
+  double m_e_err = 0.60;      // ERROR触发阈值
 
   ros::Time m_offset_time;
   double m_offset_x = 0;  double m_offset_y = 0;  double m_offset_yaw = 0;  double m_sample_std_xy = 0;  double m_sample_std_yaw = 0;
