@@ -303,272 +303,294 @@ protected:
   }
 
   void loc_update(const ros::TimerEvent &event) {
-    std::lock_guard<std::mutex> lock(m_node_mutex);
-    if (!m_map || m_scan_buffer.empty()) {
-      return;
-    }
+    double best_score_snapshot = 0.0;
+    Matrix<double, 3, 1> grad_std_uvw_snapshot;
+    double std_xy_snapshot = 0.0, std_yaw_snapshot = 0.0;
+    int mode_snapshot = 0;
+    ros::Time offset_time_snapshot;
+    bool have_snapshot = false;
 
-    tf::StampedTransform base_to_odom;
-    try {
-      m_tf.lookupTransform(m_odom_frame, m_base_frame, ros::Time(0),
-                           base_to_odom);
-    } catch (const std::exception &ex) {
-      ROS_WARN_STREAM("NeoLocalizationNode: lookupTransform(m_base_frame, "
-                      "m_odom_frame) failed: "
-                      << ex.what());
-      return;
-    }
+    {
+      std::lock_guard<std::mutex> lock(m_node_mutex);
+      if (!m_map || m_scan_buffer.empty()) {
+        return;
+      }
 
-    const Matrix<double, 4, 4> L = convert_transform_25(base_to_odom);
-    const Matrix<double, 4, 4> T = translate25(m_offset_x, m_offset_y) *
-                                   rotate25_z(m_offset_yaw); // odom to map
+      tf::StampedTransform base_to_odom;
+      try {
+        m_tf.lookupTransform(m_odom_frame, m_base_frame, ros::Time(0),
+                             base_to_odom);
+      } catch (const std::exception &ex) {
+        ROS_WARN_STREAM("NeoLocalizationNode: lookupTransform(m_base_frame, "
+                        "m_odom_frame) failed: "
+                        << ex.what());
+        return;
+      }
 
-    const Matrix<double, 3, 1> odom_pose =
-        (L * Matrix<double, 4, 1>{0, 0, 0, 1}).project();
-    const double dist_moved = (odom_pose - m_last_odom_pose).get<2>().norm();
-    const double rad_rotated =
-        fabs(angles::normalize_angle(odom_pose[2] - m_last_odom_pose[2]));
+      const Matrix<double, 4, 4> L = convert_transform_25(base_to_odom);
+      const Matrix<double, 4, 4> T = translate25(m_offset_x, m_offset_y) *
+                                     rotate25_z(m_offset_yaw); // odom to map
 
-    std::vector<scan_point_t> points;
+      const Matrix<double, 3, 1> odom_pose =
+          (L * Matrix<double, 4, 1>{0, 0, 0, 1}).project();
+      const double dist_moved = (odom_pose - m_last_odom_pose).get<2>().norm();
+      const double rad_rotated =
+          fabs(angles::normalize_angle(odom_pose[2] - m_last_odom_pose[2]));
 
-    // convert all scans to current base frame
-    for (const auto &scan : m_scan_buffer) {
-      auto scan_points = convert_scan(scan.second, L.inverse());
-      points.insert(points.end(), scan_points.begin(), scan_points.end());
-    }
+      std::vector<scan_point_t> points;
 
-    // check for number of points
-    if (points.size() < m_min_points) {
-      ROS_WARN_STREAM(
-          "NeoLocalizationNode: Number of points too low: " << points.size());
-      return;
-    }
+      // convert all scans to current base frame
+      for (const auto &scan : m_scan_buffer) {
+        auto scan_points = convert_scan(scan.second, L.inverse());
+        points.insert(points.end(), scan_points.begin(), scan_points.end());
+      }
 
-    auto pose_array = boost::make_shared<geometry_msgs::PoseArray>();
-    pose_array->header.stamp = base_to_odom.stamp_;
-    pose_array->header.frame_id = m_map_frame;
+      // check for number of points
+      if (points.size() < m_min_points) {
+        ROS_WARN_STREAM(
+            "NeoLocalizationNode: Number of points too low: " << points.size());
+        return;
+      }
 
-    // calc predicted grid pose based on odometry
-    const Matrix<double, 3, 1> grid_pose =
-        (m_grid_to_map.inverse() * T * L * Matrix<double, 4, 1>{0, 0, 0, 1})
-            .project();
+      auto pose_array = boost::make_shared<geometry_msgs::PoseArray>();
+      pose_array->header.stamp = base_to_odom.stamp_;
+      pose_array->header.frame_id = m_map_frame;
 
-    // setup distributions
-    std::normal_distribution<double> dist_x(grid_pose[0], m_sample_std_xy);
-    std::normal_distribution<double> dist_y(grid_pose[1], m_sample_std_xy);
-    std::normal_distribution<double> dist_yaw(grid_pose[2], m_sample_std_yaw);
+      // calc predicted grid pose based on odometry
+      const Matrix<double, 3, 1> grid_pose =
+          (m_grid_to_map.inverse() * T * L * Matrix<double, 4, 1>{0, 0, 0, 1})
+              .project();
 
-    // solve odometry prediction first
-    m_solver.pose_x = grid_pose[0];
-    m_solver.pose_y = grid_pose[1];
-    m_solver.pose_yaw = grid_pose[2];
+      // setup distributions
+      std::normal_distribution<double> dist_x(grid_pose[0], m_sample_std_xy);
+      std::normal_distribution<double> dist_y(grid_pose[1], m_sample_std_xy);
+      std::normal_distribution<double> dist_yaw(grid_pose[2], m_sample_std_yaw);
 
-    for (int iter = 0; iter < m_solver_iterations; ++iter) {
-      m_solver.solve<float>(*m_map, points);
-    }
+      // solve odometry prediction first
+      m_solver.pose_x = grid_pose[0];
+      m_solver.pose_y = grid_pose[1];
+      m_solver.pose_yaw = grid_pose[2];
 
-    double best_x = m_solver.pose_x;
-    double best_y = m_solver.pose_y;
-    double best_yaw = m_solver.pose_yaw;
-    double best_score = m_solver.r_norm;
-
-    std::vector<Matrix<double, 3, 1>> seeds(m_sample_rate);
-    std::vector<Matrix<double, 3, 1>> samples(m_sample_rate);
-    std::vector<double> sample_errors(m_sample_rate);
-
-    for (int i = 0; i < m_sample_rate; ++i) {
-      // generate new sample
-      m_solver.pose_x = dist_x(m_generator);
-      m_solver.pose_y = dist_y(m_generator);
-      m_solver.pose_yaw = dist_yaw(m_generator);
-
-      seeds[i] = Matrix<double, 3, 1>{m_solver.pose_x, m_solver.pose_y,
-                                      m_solver.pose_yaw};
-
-      // solve sample
       for (int iter = 0; iter < m_solver_iterations; ++iter) {
         m_solver.solve<float>(*m_map, points);
       }
 
-      // save sample
-      const auto sample = Matrix<double, 3, 1>{m_solver.pose_x, m_solver.pose_y,
-                                               m_solver.pose_yaw};
-      samples[i] = sample;
-      sample_errors[i] = m_solver.r_norm;
+      double best_x = m_solver.pose_x;
+      double best_y = m_solver.pose_y;
+      double best_yaw = m_solver.pose_yaw;
+      double best_score = m_solver.r_norm;
 
-      // check if sample is better
-      if (m_solver.r_norm > best_score) {
-        best_x = m_solver.pose_x;
-        best_y = m_solver.pose_y;
-        best_yaw = m_solver.pose_yaw;
-        best_score = m_solver.r_norm;
-      }
+      std::vector<Matrix<double, 3, 1>> seeds(m_sample_rate);
+      std::vector<Matrix<double, 3, 1>> samples(m_sample_rate);
+      std::vector<double> sample_errors(m_sample_rate);
 
-      // add to visualization
-      {
-        const Matrix<double, 3, 1> map_pose =
-            (m_grid_to_map * sample.extend()).project();
-        tf::Pose pose;
-        pose.setOrigin(tf::Vector3(map_pose[0], map_pose[1], 0));
-        pose.setRotation(tf::createQuaternionFromYaw(map_pose[2]));
-        geometry_msgs::Pose tmp;
-        tf::poseTFToMsg(pose, tmp);
-        pose_array->poses.push_back(tmp);
-      }
-    }
+      for (int i = 0; i < m_sample_rate; ++i) {
+        // generate new sample
+        m_solver.pose_x = dist_x(m_generator);
+        m_solver.pose_y = dist_y(m_generator);
+        m_solver.pose_yaw = dist_yaw(m_generator);
 
-    // compute covariances
-    double mean_score = 0;
-    Matrix<double, 3, 1> mean_xyw;
-    Matrix<double, 3, 1> seed_mean_xyw;
-    const double var_error = compute_variance(sample_errors, mean_score);
-    const Matrix<double, 3, 3> var_xyw = compute_covariance(samples, mean_xyw);
-    const Matrix<double, 3, 3> grad_var_xyw =
-        compute_virtual_scan_covariance_xyw(
-            m_map, points, Matrix<double, 3, 1>{best_x, best_y, best_yaw});
+        seeds[i] = Matrix<double, 3, 1>{m_solver.pose_x, m_solver.pose_y,
+                                        m_solver.pose_yaw};
 
-    // compute gradient characteristic
-    std::array<Matrix<double, 2, 1>, 2> grad_eigen_vectors;
-    const Matrix<double, 2, 1> grad_eigen_values =
-        compute_eigenvectors_2(grad_var_xyw.get<2, 2>(), grad_eigen_vectors);
-    const Matrix<double, 3, 1> grad_std_uvw{sqrt(grad_eigen_values[0]),
-                                            sqrt(grad_eigen_values[1]),
-                                            sqrt(grad_var_xyw(2, 2))};
+        // solve sample
+        for (int iter = 0; iter < m_solver_iterations; ++iter) {
+          m_solver.solve<float>(*m_map, points);
+        }
 
-    // decide if we have 3D, 2D, 1D or 0D localization
-    int mode = 0;
-    if (best_score > m_min_score) {
-      if (grad_std_uvw[0] > m_constrain_threshold) {
-        if (grad_std_uvw[1] > m_constrain_threshold) {
-          mode = 3; // 2D position + rotation
-        } else if (grad_std_uvw[2] > m_constrain_threshold_yaw) {
-          mode = 2; // 1D position + rotation
-        } else {
-          mode = 1; // 1D position only
+        // save sample
+        const auto sample = Matrix<double, 3, 1>{m_solver.pose_x, m_solver.pose_y,
+                                                 m_solver.pose_yaw};
+        samples[i] = sample;
+        sample_errors[i] = m_solver.r_norm;
+
+        // check if sample is better
+        if (m_solver.r_norm > best_score) {
+          best_x = m_solver.pose_x;
+          best_y = m_solver.pose_y;
+          best_yaw = m_solver.pose_yaw;
+          best_score = m_solver.r_norm;
+        }
+
+        // add to visualization
+        {
+          const Matrix<double, 3, 1> map_pose =
+              (m_grid_to_map * sample.extend()).project();
+          tf::Pose pose;
+          pose.setOrigin(tf::Vector3(map_pose[0], map_pose[1], 0));
+          pose.setRotation(tf::createQuaternionFromYaw(map_pose[2]));
+          geometry_msgs::Pose tmp;
+          tf::poseTFToMsg(pose, tmp);
+          pose_array->poses.push_back(tmp);
         }
       }
-    }
 
-    if (mode > 0) {
-      double new_grid_x = best_x;
-      double new_grid_y = best_y;
-      double new_grid_yaw = best_yaw;
+      // compute covariances
+      double mean_score = 0;
+      Matrix<double, 3, 1> mean_xyw;
+      Matrix<double, 3, 1> seed_mean_xyw;
+      const double var_error = compute_variance(sample_errors, mean_score);
+      const Matrix<double, 3, 3> var_xyw = compute_covariance(samples, mean_xyw);
+      const Matrix<double, 3, 3> grad_var_xyw =
+          compute_virtual_scan_covariance_xyw(
+              m_map, points, Matrix<double, 3, 1>{best_x, best_y, best_yaw});
 
-      if (mode < 3) {
-        // constrain update to the good direction (ie. in direction of the eigen
-        // vector with the smaller sigma)
-        const auto delta = Matrix<double, 2, 1>{best_x, best_y} -
-                           Matrix<double, 2, 1>{grid_pose[0], grid_pose[1]};
-        const auto dist = grad_eigen_vectors[0].dot(delta);
-        new_grid_x = grid_pose[0] + dist * grad_eigen_vectors[0][0];
-        new_grid_y = grid_pose[1] + dist * grad_eigen_vectors[0][1];
+      // compute gradient characteristic
+      std::array<Matrix<double, 2, 1>, 2> grad_eigen_vectors;
+      const Matrix<double, 2, 1> grad_eigen_values =
+          compute_eigenvectors_2(grad_var_xyw.get<2, 2>(), grad_eigen_vectors);
+      const Matrix<double, 3, 1> grad_std_uvw{sqrt(grad_eigen_values[0]),
+                                              sqrt(grad_eigen_values[1]),
+                                              sqrt(grad_var_xyw(2, 2))};
+
+      // decide if we have 3D, 2D, 1D or 0D localization
+      int mode = 0;
+      if (best_score > m_min_score) {
+        if (grad_std_uvw[0] > m_constrain_threshold) {
+          if (grad_std_uvw[1] > m_constrain_threshold) {
+            mode = 3; // 2D position + rotation
+          } else if (grad_std_uvw[2] > m_constrain_threshold_yaw) {
+            mode = 2; // 1D position + rotation
+          } else {
+            mode = 1; // 1D position only
+          }
+        }
       }
-      if (mode < 2) {
-        new_grid_yaw = grid_pose[2]; // keep old orientation
+
+      if (mode > 0) {
+        double new_grid_x = best_x;
+        double new_grid_y = best_y;
+        double new_grid_yaw = best_yaw;
+
+        if (mode < 3) {
+          // constrain update to the good direction (ie. in direction of the eigen
+          // vector with the smaller sigma)
+          const auto delta = Matrix<double, 2, 1>{best_x, best_y} -
+                             Matrix<double, 2, 1>{grid_pose[0], grid_pose[1]};
+          const auto dist = grad_eigen_vectors[0].dot(delta);
+          new_grid_x = grid_pose[0] + dist * grad_eigen_vectors[0][0];
+          new_grid_y = grid_pose[1] + dist * grad_eigen_vectors[0][1];
+        }
+        if (mode < 2) {
+          new_grid_yaw = grid_pose[2]; // keep old orientation
+        }
+
+        // use best sample for update
+        Matrix<double, 4, 4> grid_pose_new =
+            translate25(new_grid_x, new_grid_y) * rotate25_z(new_grid_yaw);
+
+        // compute new odom to map offset from new grid pose
+        const Matrix<double, 3, 1> new_offset =
+            (m_grid_to_map * grid_pose_new * L.inverse() *
+             Matrix<double, 4, 1>{0, 0, 0, 1})
+                .project();
+
+        // apply new offset with an exponential low pass filter
+        m_offset_x += (new_offset[0] - m_offset_x) * m_update_gain;
+        m_offset_y += (new_offset[1] - m_offset_y) * m_update_gain;
+        m_offset_yaw +=
+            angles::shortest_angular_distance(m_offset_yaw, new_offset[2]) *
+            m_update_gain;
+      }
+      m_offset_time = base_to_odom.stamp_;
+
+      // update particle spread depending on mode
+      if (mode >= 3) {
+        m_sample_std_xy *= (1 - m_confidence_gain);
+      } else {
+        m_sample_std_xy += dist_moved * m_odometry_std_xy;
+      }
+      if (mode >= 2) {
+        m_sample_std_yaw *= (1 - m_confidence_gain);
+      } else {
+        m_sample_std_yaw += rad_rotated * m_odometry_std_yaw;
       }
 
-      // use best sample for update
-      Matrix<double, 4, 4> grid_pose_new =
-          translate25(new_grid_x, new_grid_y) * rotate25_z(new_grid_yaw);
+      // limit particle spread
+      m_sample_std_xy =
+          fmin(fmax(m_sample_std_xy, m_min_sample_std_xy), m_max_sample_std_xy);
+      m_sample_std_yaw = fmin(fmax(m_sample_std_yaw, m_min_sample_std_yaw),
+                              m_max_sample_std_yaw);
 
-      // compute new odom to map offset from new grid pose
-      const Matrix<double, 3, 1> new_offset =
-          (m_grid_to_map * grid_pose_new * L.inverse() *
+      // publish new transform
+      broadcast();
+
+      const Matrix<double, 3, 1> new_map_pose =
+          (translate25(m_offset_x, m_offset_y) * rotate25_z(m_offset_yaw) * L *
            Matrix<double, 4, 1>{0, 0, 0, 1})
               .project();
 
-      // apply new offset with an exponential low pass filter
-      m_offset_x += (new_offset[0] - m_offset_x) * m_update_gain;
-      m_offset_y += (new_offset[1] - m_offset_y) * m_update_gain;
-      m_offset_yaw +=
-          angles::shortest_angular_distance(m_offset_yaw, new_offset[2]) *
-          m_update_gain;
-    }
-    m_offset_time = base_to_odom.stamp_;
-
-    // update particle spread depending on mode
-    if (mode >= 3) {
-      m_sample_std_xy *= (1 - m_confidence_gain);
-    } else {
-      m_sample_std_xy += dist_moved * m_odometry_std_xy;
-    }
-    if (mode >= 2) {
-      m_sample_std_yaw *= (1 - m_confidence_gain);
-    } else {
-      m_sample_std_yaw += rad_rotated * m_odometry_std_yaw;
-    }
-
-    // limit particle spread
-    m_sample_std_xy =
-        fmin(fmax(m_sample_std_xy, m_min_sample_std_xy), m_max_sample_std_xy);
-    m_sample_std_yaw = fmin(fmax(m_sample_std_yaw, m_min_sample_std_yaw),
-                            m_max_sample_std_yaw);
-
-    // publish new transform
-    broadcast();
-
-    const Matrix<double, 3, 1> new_map_pose =
-        (translate25(m_offset_x, m_offset_y) * rotate25_z(m_offset_yaw) * L *
-         Matrix<double, 4, 1>{0, 0, 0, 1})
-            .project();
-
-    // publish localization pose
-    auto loc_pose =
-        boost::make_shared<geometry_msgs::PoseWithCovarianceStamped>();
-    loc_pose->header.stamp = m_offset_time;
-    loc_pose->header.frame_id = m_map_frame;
-    loc_pose->pose.pose.position.x = new_map_pose[0];
-    loc_pose->pose.pose.position.y = new_map_pose[1];
-    loc_pose->pose.pose.position.z = 0;
-    tf::quaternionTFToMsg(tf::createQuaternionFromYaw(new_map_pose[2]),
-                          loc_pose->pose.pose.orientation);
-    for (int j = 0; j < 3; ++j) {
-      for (int i = 0; i < 3; ++i) {
-        const int i_ = (i == 2 ? 5 : i);
-        const int j_ = (j == 2 ? 5 : j);
-        loc_pose->pose.covariance[j_ * 6 + i_] = var_xyw(i, j);
+      // publish localization pose
+      auto loc_pose =
+          boost::make_shared<geometry_msgs::PoseWithCovarianceStamped>();
+      loc_pose->header.stamp = m_offset_time;
+      loc_pose->header.frame_id = m_map_frame;
+      loc_pose->pose.pose.position.x = new_map_pose[0];
+      loc_pose->pose.pose.position.y = new_map_pose[1];
+      loc_pose->pose.pose.position.z = 0;
+      tf::quaternionTFToMsg(tf::createQuaternionFromYaw(new_map_pose[2]),
+                            loc_pose->pose.pose.orientation);
+      for (int j = 0; j < 3; ++j) {
+        for (int i = 0; i < 3; ++i) {
+          const int i_ = (i == 2 ? 5 : i);
+          const int j_ = (j == 2 ? 5 : j);
+          loc_pose->pose.covariance[j_ * 6 + i_] = var_xyw(i, j);
+        }
       }
+      m_pub_loc_pose.publish(loc_pose);
+      m_pub_loc_pose_2.publish(loc_pose);
+
+      // publish visualization
+      m_pub_pose_array.publish(pose_array);
+
+      // keep last odom pose
+      m_last_odom_pose = odom_pose;
+
+      if (update_counter++ % 10 == 0) {
+        ROS_INFO_STREAM(
+            "NeoLocalizationNode: score="
+            << float(best_score) << ", grad_uvw=[" << float(grad_std_uvw[0])
+            << ", " << float(grad_std_uvw[1]) << ", " << float(grad_std_uvw[2])
+            << "], std_xy=" << float(m_sample_std_xy)
+            << " m, std_yaw=" << float(m_sample_std_yaw) << " rad, mode=" << mode
+            << "D, " << m_scan_buffer.size() << " scans");
+      }
+
+      // clear scan buffer
+      m_scan_buffer.clear();
+
+      // 保存当前结果到快照，用于锁外处理
+      best_score_snapshot = best_score;
+      grad_std_uvw_snapshot = grad_std_uvw;
+      std_xy_snapshot = m_sample_std_xy;
+      std_yaw_snapshot = m_sample_std_yaw;
+      mode_snapshot = mode;
+      offset_time_snapshot = m_offset_time;
+      have_snapshot = true;
     }
-    m_pub_loc_pose.publish(loc_pose);
-    m_pub_loc_pose_2.publish(loc_pose);
-
-    // publish visualization
-    m_pub_pose_array.publish(pose_array);
-
-    // keep last odom pose
-    m_last_odom_pose = odom_pose;
-
-    if (update_counter++ % 10 == 0) {
-      ROS_INFO_STREAM(
-          "NeoLocalizationNode: score="
-          << float(best_score) << ", grad_uvw=[" << float(grad_std_uvw[0])
-          << ", " << float(grad_std_uvw[1]) << ", " << float(grad_std_uvw[2])
-          << "], std_xy=" << float(m_sample_std_xy)
-          << " m, std_yaw=" << float(m_sample_std_yaw) << " rad, mode=" << mode
-          << "D, " << m_scan_buffer.size() << " scans");
+    // 如果没有成功获得数据，直接返回
+    if (!have_snapshot) {
+      return;
     }
+    
+    // 卡尔曼滤波处理（使用与定位一致的时间戳）
+    double filtered_score = kf_score.update(best_score_snapshot, offset_time_snapshot);
+    double filtered_uvw0 = kf_uvw0.update(grad_std_uvw_snapshot[0], offset_time_snapshot);
+    double filtered_uvw1 = kf_uvw1.update(grad_std_uvw_snapshot[1], offset_time_snapshot);
+    double filtered_stdxy = kf_stdxy.update(std_xy_snapshot, offset_time_snapshot);
+    double filtered_stdyaw = kf_stdyaw.update(std_yaw_snapshot, offset_time_snapshot);
 
-    // clear scan buffer
-    m_scan_buffer.clear();
-
-    // 卡尔曼滤波处理
-    double filtered_score = kf_score.update(best_score);
-    double filtered_uvw0 = kf_uvw0.update(grad_std_uvw[0]);
-    double filtered_uvw1 = kf_uvw1.update(grad_std_uvw[1]);
-    double filtered_stdxy = kf_stdxy.update(m_sample_std_xy);
-    double filtered_stdyaw = kf_stdyaw.update(m_sample_std_yaw);
-
-    // 发布自定义消息
+    // 发布自定义消息（原始数据）
     neo_localization::LocalizationStats stats_msg;
-    stats_msg.header.stamp = ros::Time::now();
+    stats_msg.header.stamp = offset_time_snapshot; 
     stats_msg.header.frame_id = m_map_frame;
-    stats_msg.score = best_score;
-    stats_msg.grad_uvw[0] = grad_std_uvw[0];
-    stats_msg.grad_uvw[1] = grad_std_uvw[1];
-    stats_msg.grad_uvw[2] = grad_std_uvw[2];
-    stats_msg.std_xy = m_sample_std_xy;
-    stats_msg.std_yaw = m_sample_std_yaw;
-    stats_msg.mode = mode;
+    stats_msg.score = best_score_snapshot;
+    stats_msg.grad_uvw[0] = grad_std_uvw_snapshot[0];
+    stats_msg.grad_uvw[1] = grad_std_uvw_snapshot[1];
+    stats_msg.grad_uvw[2] = grad_std_uvw_snapshot[2];
+    stats_msg.std_xy = std_xy_snapshot;
+    stats_msg.std_yaw = std_yaw_snapshot;
+    stats_msg.mode = mode_snapshot;
     m_pub_stats.publish(stats_msg);
 
     // 发布滤波后的消息
@@ -579,7 +601,7 @@ protected:
     filtered_msg.std_xy = filtered_stdxy;
     filtered_msg.std_yaw = filtered_stdyaw;
 
-    // 1) 指标归一化并计算风险分：分数低、梯度低、方差大都提高风险
+    // 指标归一化并计算风险分：分数低、梯度低、方差大都提高风险
     auto clamp01 = [](double x){ return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x); };
     double r_score = clamp01((m_th_score_warn - filtered_score) / std::max(1e-6, m_th_score_warn));
     double r_uvw0  = clamp01((m_th_uvw0_warn  - filtered_uvw0) / std::max(1e-6, m_th_uvw0_warn));
@@ -589,17 +611,22 @@ protected:
 
     double risk = m_w_score*r_score + m_w_uvw0*r_uvw0 + m_w_uvw1*r_uvw1 + m_w_stdxy*r_stdxy + m_w_stdyaw*r_stdyaw;
 
-    // 2) 基于更严格阈值的硬条件判定
+    // 基于更严格阈值的硬条件判定
     bool hard_error = (filtered_score < m_th_score_err) || (filtered_uvw0 < m_th_uvw0_err) || (filtered_uvw1 < m_th_uvw1_err)
                    || (filtered_stdxy > m_th_stdxy_err) || (filtered_stdyaw > m_th_stdyaw_err);
     if (hard_error) risk = std::max(risk, m_risk_err);
 
-    // 3) leaky integrator
-    const double over  = std::max(0.0, risk - m_risk_clear) / std::max(1e-6, m_risk_err - m_risk_clear);
-    const double under = std::max(0.0, m_risk_clear - risk) / std::max(1e-6, m_risk_clear);
-    m_evidence += m_e_up * over - m_e_down * under;
-    m_evidence = clamp01(m_evidence);
+    // 使用局部锁保护证据积分器状态更新（轻量锁，减小与fix_mon的竞争）
+    {
+      std::lock_guard<std::mutex> light_lock(m_node_mutex);
+      // leaky integrator
+      const double over  = std::max(0.0, risk - m_risk_clear) / std::max(1e-6, m_risk_err - m_risk_clear);
+      const double under = std::max(0.0, m_risk_clear - risk) / std::max(1e-6, m_risk_clear);
+      m_evidence += m_e_up * over - m_e_down * under;
+      m_evidence = clamp01(m_evidence);
+    }
 
+    // 状态转换判定
     int level_val = 1; // 1=正常, 2=警告, 3=错误
     if (m_evidence >= m_e_err)      level_val = 3;
     else if (m_evidence >= m_e_warn) level_val = 2;
@@ -607,6 +634,7 @@ protected:
     filtered_msg.abnormal = (level_val != 1);
     filtered_msg.level = static_cast<uint8_t>(level_val);
 
+    // 格式化消息字符串
     char buf2[160];
     if (level_val == 3) {
       snprintf(buf2, sizeof(buf2), "[KF] 定位错误: risk=%.2f ev=%.2f (score=%.2f, uvw0=%.2f, uvw1=%.2f, std_xy=%.2f, std_yaw=%.2f)",
@@ -621,24 +649,25 @@ protected:
     }
 
     filtered_msg.risk = static_cast<float>(m_evidence);
-
     m_pub_stats_filtered.publish(filtered_msg);
 
-    if (m_err_client) {
-      if (level_val != m_last_level) {
-        if (level_val == 1) {
-          // 恢复正常: 注销34100003
-          m_err_client->unregisterErrorMsg(34100003);
-        } else if (level_val == 2) {
-          // 警告级别: 不上报错误码，仅准备后续切换odom源
-          // 如果之前有错误码，先注销
-          m_err_client->unregisterErrorMsg(34100003);
-        } else if (level_val == 3) {
-          m_err_client->unregisterErrorMsg(34100003);
-          m_err_client->registerErrorMsg(34100003, 1, "localization error");
-        }
-        m_last_level = level_val;
+    // 错误监控处理
+    if (m_err_client && level_val != m_last_level) {
+      if (level_val == 1) {
+        // 恢复正常: 注销34100003
+        m_err_client->unregisterErrorMsg(34100003);
+      } else if (level_val == 2) {
+        // 警告级别: 不上报错误码，仅准备后续切换odom源
+        // 如果之前有错误码，先注销
+        m_err_client->unregisterErrorMsg(34100003);
+      } else if (level_val == 3) {
+        m_err_client->unregisterErrorMsg(34100003);
+        m_err_client->registerErrorMsg(34100003, 1, "localization error");
       }
+      
+      // 安全更新状态等级
+      std::lock_guard<std::mutex> light_lock(m_node_mutex);
+      m_last_level = level_val;
     }
   }
 
