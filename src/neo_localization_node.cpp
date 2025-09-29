@@ -129,7 +129,7 @@ public:
 
     m_node_handle.param("update_gain", m_update_gain, 0.5);
     m_node_handle.param("confidence_gain", m_confidence_gain, 0.01);
-    m_node_handle.param("min_score", m_min_score, 0.2);
+    m_node_handle.param("min_score", m_min_score, 0.25);
     m_node_handle.param("odometry_std_xy", m_odometry_std_xy, 0.01);
     m_node_handle.param("odometry_std_yaw", m_odometry_std_yaw, 0.01);
     m_node_handle.param("min_sample_std_xy", m_min_sample_std_xy, 0.025);
@@ -143,17 +143,38 @@ public:
     m_node_handle.param("map_update_rate", m_map_update_rate, 0.5);
     m_node_handle.param("transform_timeout", m_transform_timeout, 0.2);
 
-    // 风险评估参数（可通过参数服务器调整）
+    // 风险评估参数
     m_node_handle.param("th_score_warn", m_th_score_warn, 0.55);
     m_node_handle.param("th_score_err", m_th_score_err, 0.25);
     m_node_handle.param("th_uvw0_warn", m_th_uvw0_warn, 0.25);
     m_node_handle.param("th_uvw0_err", m_th_uvw0_err, 0.10);
     m_node_handle.param("th_uvw1_warn", m_th_uvw1_warn, 0.20);
     m_node_handle.param("th_uvw1_err", m_th_uvw1_err, 0.08);
+
     m_node_handle.param("th_stdxy_warn", m_th_stdxy_warn, 0.20);
     m_node_handle.param("th_stdxy_err", m_th_stdxy_err, 0.30);
     m_node_handle.param("th_stdyaw_warn", m_th_stdyaw_warn, 0.20);
     m_node_handle.param("th_stdyaw_err", m_th_stdyaw_err, 0.30);
+    
+    m_node_handle.param("th_stdxy_warn_3d", m_th_stdxy_warn_3d, 0.20);
+    m_node_handle.param("th_stdxy_err_3d", m_th_stdxy_err_3d, 0.30);
+    m_node_handle.param("th_stdyaw_warn_3d", m_th_stdyaw_warn_3d, 0.20);
+    m_node_handle.param("th_stdyaw_err_3d", m_th_stdyaw_err_3d, 0.30);
+    
+    m_node_handle.param("th_stdxy_warn_2d", m_th_stdxy_warn_2d, 0.30);
+    m_node_handle.param("th_stdxy_err_2d", m_th_stdxy_err_2d, 0.40);
+    m_node_handle.param("th_stdyaw_warn_2d", m_th_stdyaw_warn_2d, 0.30);
+    m_node_handle.param("th_stdyaw_err_2d", m_th_stdyaw_err_2d, 0.40);
+    
+    m_node_handle.param("th_stdxy_warn_1d", m_th_stdxy_warn_1d, 0.40);
+    m_node_handle.param("th_stdxy_err_1d", m_th_stdxy_err_1d, 0.50);
+    m_node_handle.param("th_stdyaw_warn_1d", m_th_stdyaw_warn_1d, 0.40);
+    m_node_handle.param("th_stdyaw_err_1d", m_th_stdyaw_err_1d, 0.50);
+    
+    m_node_handle.param("th_stdxy_warn_0d", m_th_stdxy_warn_0d, 0.50);
+    m_node_handle.param("th_stdxy_err_0d", m_th_stdxy_err_0d, 0.60);
+    m_node_handle.param("th_stdyaw_warn_0d", m_th_stdyaw_warn_0d, 0.50);
+    m_node_handle.param("th_stdyaw_err_0d", m_th_stdyaw_err_0d, 0.60);
 
     m_node_handle.param("w_score", m_w_score, 0.6);
     m_node_handle.param("w_uvw0", m_w_uvw0, 0.15);
@@ -166,10 +187,14 @@ public:
     m_node_handle.param("risk_err", m_risk_err, 0.6);
 
     // 证据积分参数
-    m_node_handle.param("evidence_up",   m_e_up,   0.25); // 风险高于warn时的增长速率
+    m_node_handle.param("evidence_up",   m_e_up,   0.15); // 风险高于warn时的增长速率
     m_node_handle.param("evidence_down", m_e_down, 0.10); // 风险低于warn时的衰减速率
     m_node_handle.param("evidence_warn", m_e_warn, 0.30);  // WARN阈值（证据）
-    m_node_handle.param("evidence_err",  m_e_err,  0.60);  // ERROR阈值（证据）
+    m_node_handle.param("evidence_err",  m_e_err,  0.65);  // ERROR阈值（证据）
+    
+    // 模式稳定性参数
+    m_node_handle.param("stable_mode_threshold", m_stable_mode_threshold, 3);  // 模式稳定所需的连续帧数
+    m_node_handle.param("mode_hysteresis", m_mode_hysteresis, 0.05);          // 模式判断滞后阈值
 
 		// Read initial pose parameters
     double initial_pose_x, initial_pose_y, initial_pose_a;
@@ -186,8 +211,9 @@ public:
                initial_pose_x, initial_pose_y, initial_pose_a);
       set_initial_pose(initial_pose_x, initial_pose_y, initial_pose_a);
     } else {
-      ROS_INFO("Initial pose parameters not found or incomplete. Waiting for "
-               "manual initialization.");
+      // 等待手动初始化的信息
+      // ROS_INFO("Initial pose parameters not found or incomplete. Waiting for "
+      //          "manual initialization.");
     }
 
     m_sub_scan_topic = m_node_handle.subscribe(
@@ -443,19 +469,108 @@ protected:
                                               sqrt(grad_eigen_values[1]),
                                               sqrt(grad_var_xyw(2, 2))};
 
-      // decide if we have 3D, 2D, 1D or 0D localization
-      int mode = 0;
-      if (best_score > m_min_score) {
-        if (grad_std_uvw[0] > m_constrain_threshold) {
-          if (grad_std_uvw[1] > m_constrain_threshold) {
-            mode = 3; // 2D position + rotation
-          } else if (grad_std_uvw[2] > m_constrain_threshold_yaw) {
-            mode = 2; // 1D position + rotation
+      int potential_mode = 0;
+      int new_mode = m_mode;  
+
+      // 1. 分数判断
+      if (best_score <= m_min_score) {
+        potential_mode = 0;
+      } 
+      // 2. 根据约束强度判定潜在模式
+      else {
+        bool has_x_constraint = grad_std_uvw[0] > m_constrain_threshold;
+        bool has_y_constraint = grad_std_uvw[1] > m_constrain_threshold;
+        bool has_yaw_constraint = grad_std_uvw[2] > m_constrain_threshold_yaw;
+
+        if (has_x_constraint) {
+          if (has_y_constraint) {
+            potential_mode = 3;  
+          } else if (has_yaw_constraint) {
+            potential_mode = 2;  
           } else {
-            mode = 1; // 1D position only
+            potential_mode = 1;  
           }
+        } else {
+          potential_mode = 0;    
         }
       }
+
+      // 3. 应用滞后逻辑和稳定性判断
+      if (potential_mode != m_mode) {
+        if (potential_mode > m_mode) {
+          bool strong_evidence = true;
+          
+          if (potential_mode == 3) {
+            strong_evidence = (grad_std_uvw[0] > m_constrain_threshold * (1.0 + m_mode_hysteresis)) && 
+                              (grad_std_uvw[1] > m_constrain_threshold * (1.0 + m_mode_hysteresis)) &&
+                              (best_score > m_min_score * 1.2);  
+          } 
+          else if (potential_mode == 2) {
+            strong_evidence = (grad_std_uvw[0] > m_constrain_threshold * (1.0 + m_mode_hysteresis)) && 
+                              (grad_std_uvw[2] > m_constrain_threshold_yaw * (1.0 + m_mode_hysteresis));
+          }
+          else if (potential_mode == 1) {
+            strong_evidence = (grad_std_uvw[0] > m_constrain_threshold * (1.0 + m_mode_hysteresis));
+          }
+          
+          if (strong_evidence) {
+            m_stable_mode_count++;
+            if (m_stable_mode_count >= m_stable_mode_threshold) {
+              new_mode = potential_mode;
+              m_stable_mode_count = 0;  
+              ROS_INFO("Mode upgraded: %d -> %d (strong evidence)", m_mode, new_mode);
+            }
+          } else {
+            m_stable_mode_count = 0;  
+          }
+        }
+        else {
+          bool weak_evidence = false;
+          
+          // 从不同当前模式降级的条件
+          if (m_mode == 3) {
+            weak_evidence = (grad_std_uvw[0] < m_constrain_threshold * (1.0 - m_mode_hysteresis)) || 
+                            (grad_std_uvw[1] < m_constrain_threshold * (1.0 - m_mode_hysteresis)) ||
+                            (best_score < m_min_score * 1.1);  
+          }
+          else if (m_mode == 2) {
+            weak_evidence = (grad_std_uvw[0] < m_constrain_threshold * (1.0 - m_mode_hysteresis)) || 
+                            (grad_std_uvw[2] < m_constrain_threshold_yaw * (1.0 - m_mode_hysteresis));
+          }
+          else if (m_mode == 1) {
+            weak_evidence = (grad_std_uvw[0] < m_constrain_threshold * (1.0 - m_mode_hysteresis));
+          }
+          
+          if (weak_evidence) {
+            m_stable_mode_count++;
+            if (m_stable_mode_count >= (m_stable_mode_threshold + 1)) {
+              new_mode = potential_mode;
+              m_stable_mode_count = 0;  
+              ROS_INFO("Mode downgraded: %d -> %d (weak evidence)", m_mode, new_mode);
+            }
+          } else {
+            m_stable_mode_count = 0;
+          }
+        }
+      } else {
+        m_stable_mode_count = 0;
+      }
+
+      if (best_score < m_min_score * 0.8) {
+        new_mode = 0;
+        ROS_WARN_THROTTLE(1.0, "Emergency mode downgrade to 0D due to very low score: %.2f", best_score);
+      }
+      
+      // 5. 处理从0D快速升级的情况
+      if (m_mode == 0 && best_score > m_min_score * 1.5 && 
+          grad_std_uvw[0] > m_constrain_threshold * 1.2 &&
+          grad_std_uvw[1] > m_constrain_threshold * 1.2) {
+        new_mode = 3;
+        ROS_INFO("Fast mode upgrade from 0D to 3D due to excellent conditions");
+      }
+      
+      int mode = new_mode;
+      m_mode = new_mode; 
 
       if (mode > 0) {
         double new_grid_x = best_x;
@@ -494,23 +609,112 @@ protected:
       }
       m_offset_time = base_to_odom.stamp_;
 
-      // update particle spread depending on mode
-      if (mode >= 3) {
-        m_sample_std_xy *= (1 - m_confidence_gain);
-      } else {
-        m_sample_std_xy += dist_moved * m_odometry_std_xy;
-      }
-      if (mode >= 2) {
-        m_sample_std_yaw *= (1 - m_confidence_gain);
-      } else {
-        m_sample_std_yaw += rad_rotated * m_odometry_std_yaw;
+      double th_stdxy_warn_active, th_stdxy_err_active;
+      double th_stdyaw_warn_active, th_stdyaw_err_active;
+
+      // 选择当前模式的阈值
+      switch(mode) {
+        case 3:
+          th_stdxy_warn_active = m_th_stdxy_warn_3d;
+          th_stdxy_err_active = m_th_stdxy_err_3d;
+          th_stdyaw_warn_active = m_th_stdyaw_warn_3d;
+          th_stdyaw_err_active = m_th_stdyaw_err_3d;
+          break;
+        case 2:
+          th_stdxy_warn_active = m_th_stdxy_warn_2d;
+          th_stdxy_err_active = m_th_stdxy_err_2d;
+          th_stdyaw_warn_active = m_th_stdyaw_warn_2d;
+          th_stdyaw_err_active = m_th_stdyaw_err_2d;
+          break;
+        case 1:
+          th_stdxy_warn_active = m_th_stdxy_warn_1d;
+          th_stdxy_err_active = m_th_stdxy_err_1d;
+          th_stdyaw_warn_active = m_th_stdyaw_warn_1d;
+          th_stdyaw_err_active = m_th_stdyaw_err_1d;
+          break;
+        case 0:
+        default:
+          th_stdxy_warn_active = m_th_stdxy_warn_0d;
+          th_stdxy_err_active = m_th_stdxy_err_0d;
+          th_stdyaw_warn_active = m_th_stdyaw_warn_0d;
+          th_stdyaw_err_active = m_th_stdyaw_err_0d;
+          break;
       }
 
-      // limit particle spread
-      m_sample_std_xy =
-          fmin(fmax(m_sample_std_xy, m_min_sample_std_xy), m_max_sample_std_xy);
-      m_sample_std_yaw = fmin(fmax(m_sample_std_yaw, m_min_sample_std_yaw),
-                              m_max_sample_std_yaw);
+      // 基于模式和相应阈值更新粒子扩散
+      switch(mode) {
+        case 3: 
+          {
+
+            double confidence_factor = 1.2; 
+            m_sample_std_xy *= (1 - m_confidence_gain * confidence_factor);
+            m_sample_std_yaw *= (1 - m_confidence_gain * confidence_factor);
+            
+            double min_std_xy = th_stdxy_warn_active * 0.8;  
+            double min_std_yaw = th_stdyaw_warn_active * 0.8;
+            
+            m_sample_std_xy = fmin(fmax(m_sample_std_xy, min_std_xy), m_max_sample_std_xy);
+            m_sample_std_yaw = fmin(fmax(m_sample_std_yaw, min_std_yaw), m_max_sample_std_yaw);
+            
+            ROS_DEBUG_THROTTLE(2.0, "3D Diffusion limitation: std_xy=%.3f (min=%.3f, warn=%.3f), std_yaw=%.3f (min=%.3f, warn=%.3f)",
+                              m_sample_std_xy, min_std_xy, th_stdxy_warn_active,
+                              m_sample_std_yaw, min_std_yaw, th_stdyaw_warn_active);
+          }
+          break;
+          
+        case 2:  
+          {
+            double confidence_factor = 1.0;  
+            m_sample_std_xy *= (1 - m_confidence_gain * confidence_factor * 0.9); 
+            m_sample_std_yaw *= (1 - m_confidence_gain * confidence_factor);
+            
+            double min_std_xy = th_stdxy_warn_active * 0.85;
+            double min_std_yaw = th_stdyaw_warn_active * 0.85;
+            
+            m_sample_std_xy = fmin(fmax(m_sample_std_xy, min_std_xy), m_max_sample_std_xy);
+            m_sample_std_yaw = fmin(fmax(m_sample_std_yaw, min_std_yaw), m_max_sample_std_yaw);
+            
+            ROS_DEBUG_THROTTLE(2.0, "2D Diffusion limitation: std_xy=%.3f (min=%.3f, warn=%.3f), std_yaw=%.3f (min=%.3f, warn=%.3f)",
+                              m_sample_std_xy, min_std_xy, th_stdxy_warn_active,
+                              m_sample_std_yaw, min_std_yaw, th_stdyaw_warn_active);
+          }
+          break;
+          
+        case 1:  
+          {
+            m_sample_std_xy *= (1 - m_confidence_gain * 0.7);  
+            m_sample_std_yaw += rad_rotated * m_odometry_std_yaw;  
+          
+            double min_std_xy = th_stdxy_warn_active * 0.9;  
+            double min_std_yaw = th_stdyaw_warn_active * 0.9;
+            
+            m_sample_std_xy = fmin(fmax(m_sample_std_xy, min_std_xy), m_max_sample_std_xy);
+            m_sample_std_yaw = fmin(fmax(m_sample_std_yaw, min_std_yaw), m_max_sample_std_yaw);
+            
+            ROS_DEBUG_THROTTLE(2.0, "1D Diffusion limitation: std_xy=%.3f (min=%.3f, warn=%.3f), std_yaw=%.3f (min=%.3f, warn=%.3f)",
+                              m_sample_std_xy, min_std_xy, th_stdxy_warn_active,
+                              m_sample_std_yaw, min_std_yaw, th_stdyaw_warn_active);
+          }
+          break;
+          
+        case 0:  
+        default:
+          {
+            m_sample_std_xy += dist_moved * m_odometry_std_xy * 1.2;  
+            m_sample_std_yaw += rad_rotated * m_odometry_std_yaw * 1.2;
+            
+            double min_std_xy = th_stdxy_warn_active * 0.95;
+            double min_std_yaw = th_stdyaw_warn_active * 0.95;
+            
+            m_sample_std_xy = fmin(fmax(m_sample_std_xy, min_std_xy), m_max_sample_std_xy);
+            m_sample_std_yaw = fmin(fmax(m_sample_std_yaw, min_std_yaw), m_max_sample_std_yaw);
+            
+            ROS_DEBUG_THROTTLE(2.0, "0D Diffusion limitation: std_xy=%.3f (min=%.3f, warn=%.3f), std_yaw=%.3f (min=%.3f, warn=%.3f)",
+                              m_sample_std_xy, min_std_xy, th_stdxy_warn_active,
+                              m_sample_std_yaw, min_std_yaw, th_stdyaw_warn_active);
+          }
+          break;
+      }
 
       // publish new transform
       broadcast();
@@ -547,13 +751,13 @@ protected:
       m_last_odom_pose = odom_pose;
 
       if (update_counter++ % 10 == 0) {
-        ROS_INFO_STREAM(
-            "NeoLocalizationNode: score="
-            << float(best_score) << ", grad_uvw=[" << float(grad_std_uvw[0])
-            << ", " << float(grad_std_uvw[1]) << ", " << float(grad_std_uvw[2])
-            << "], std_xy=" << float(m_sample_std_xy)
-            << " m, std_yaw=" << float(m_sample_std_yaw) << " rad, mode=" << mode
-            << "D, " << m_scan_buffer.size() << " scans");
+        // ROS_INFO_STREAM(
+        //     "NeoLocalizationNode: score="
+        //     << float(best_score) << ", grad_uvw=[" << float(grad_std_uvw[0])
+        //     << ", " << float(grad_std_uvw[1]) << ", " << float(grad_std_uvw[2])
+        //     << "], std_xy=" << float(m_sample_std_xy)
+        //     << " m, std_yaw=" << float(m_sample_std_yaw) << " rad, mode=" << mode
+        //     << "D, " << m_scan_buffer.size() << " scans");
       }
 
       // clear scan buffer
@@ -568,19 +772,18 @@ protected:
       offset_time_snapshot = m_offset_time;
       have_snapshot = true;
     }
-    // 如果没有成功获得数据，直接返回
     if (!have_snapshot) {
       return;
     }
     
-    // 卡尔曼滤波处理（使用与定位一致的时间戳）
+    // 卡尔曼滤波处理
     double filtered_score = kf_score.update(best_score_snapshot, offset_time_snapshot);
     double filtered_uvw0 = kf_uvw0.update(grad_std_uvw_snapshot[0], offset_time_snapshot);
     double filtered_uvw1 = kf_uvw1.update(grad_std_uvw_snapshot[1], offset_time_snapshot);
     double filtered_stdxy = kf_stdxy.update(std_xy_snapshot, offset_time_snapshot);
     double filtered_stdyaw = kf_stdyaw.update(std_yaw_snapshot, offset_time_snapshot);
 
-    // 发布自定义消息（原始数据）
+    // 发布自定义消息
     neo_localization::LocalizationStats stats_msg;
     stats_msg.header.stamp = offset_time_snapshot; 
     stats_msg.header.frame_id = m_map_frame;
@@ -601,32 +804,102 @@ protected:
     filtered_msg.std_xy = filtered_stdxy;
     filtered_msg.std_yaw = filtered_stdyaw;
 
-    // 指标归一化并计算风险分：分数低、梯度低、方差大都提高风险
+    // 指标归一化并计算风险分
     auto clamp01 = [](double x){ return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x); };
+    
     double r_score = clamp01((m_th_score_warn - filtered_score) / std::max(1e-6, m_th_score_warn));
     double r_uvw0  = clamp01((m_th_uvw0_warn  - filtered_uvw0) / std::max(1e-6, m_th_uvw0_warn));
     double r_uvw1  = clamp01((m_th_uvw1_warn  - filtered_uvw1) / std::max(1e-6, m_th_uvw1_warn));
-    double r_stdxy = clamp01((filtered_stdxy   - m_th_stdxy_warn) / std::max(1e-6, m_th_stdxy_warn));
-    double r_stdyaw= clamp01((filtered_stdyaw  - m_th_stdyaw_warn)/ std::max(1e-6, m_th_stdyaw_warn));
+    
+    double th_stdxy_warn_active = m_th_stdxy_warn;
+    double th_stdxy_err_active = m_th_stdxy_err;
+    double th_stdyaw_warn_active = m_th_stdyaw_warn;
+    double th_stdyaw_err_active = m_th_stdyaw_err;
+    
+    switch(mode_snapshot) {
+        case 3: 
+            th_stdxy_warn_active = m_th_stdxy_warn_3d;
+            th_stdxy_err_active = m_th_stdxy_err_3d;
+            th_stdyaw_warn_active = m_th_stdyaw_warn_3d;
+            th_stdyaw_err_active = m_th_stdyaw_err_3d;
+            break;
+        case 2:
+            th_stdxy_warn_active = m_th_stdxy_warn_2d;
+            th_stdxy_err_active = m_th_stdxy_err_2d;
+            th_stdyaw_warn_active = m_th_stdyaw_warn_2d;
+            th_stdyaw_err_active = m_th_stdyaw_err_2d;
+            break;
+        case 1: 
+            th_stdxy_warn_active = m_th_stdxy_warn_1d;
+            th_stdxy_err_active = m_th_stdxy_err_1d;
+            th_stdyaw_warn_active = m_th_stdyaw_warn_1d;
+            th_stdyaw_err_active = m_th_stdyaw_err_1d;
+            break;
+        case 0: 
+            th_stdxy_warn_active = m_th_stdxy_warn_0d;
+            th_stdxy_err_active = m_th_stdxy_err_0d;
+            th_stdyaw_warn_active = m_th_stdyaw_warn_0d;
+            th_stdyaw_err_active = m_th_stdyaw_err_0d;
+            break;
+    }
+    
+    double r_stdxy = clamp01((filtered_stdxy - th_stdxy_warn_active) / std::max(1e-6, th_stdxy_warn_active));
+    double r_stdyaw= clamp01((filtered_stdyaw - th_stdyaw_warn_active) / std::max(1e-6, th_stdyaw_warn_active));
 
     double risk = m_w_score*r_score + m_w_uvw0*r_uvw0 + m_w_uvw1*r_uvw1 + m_w_stdxy*r_stdxy + m_w_stdyaw*r_stdyaw;
 
-    // 基于更严格阈值的硬条件判定
-    bool hard_error = (filtered_score < m_th_score_err) || (filtered_uvw0 < m_th_uvw0_err) || (filtered_uvw1 < m_th_uvw1_err)
-                   || (filtered_stdxy > m_th_stdxy_err) || (filtered_stdyaw > m_th_stdyaw_err);
+    bool hard_error = (filtered_score < m_th_score_err) || 
+                     (filtered_uvw0 < m_th_uvw0_err) || 
+                     (filtered_uvw1 < m_th_uvw1_err) ||
+                     (filtered_stdxy > th_stdxy_err_active) || 
+                     (filtered_stdyaw > th_stdyaw_err_active);
     if (hard_error) risk = std::max(risk, m_risk_err);
 
-    // 使用局部锁保护证据积分器状态更新（轻量锁，减小与fix_mon的竞争）
+    // 使用局部锁保护证据积分器状态更新
     {
       std::lock_guard<std::mutex> light_lock(m_node_mutex);
-      // leaky integrator
+      
       const double over  = std::max(0.0, risk - m_risk_clear) / std::max(1e-6, m_risk_err - m_risk_clear);
       const double under = std::max(0.0, m_risk_clear - risk) / std::max(1e-6, m_risk_clear);
+      
+      // 强制模式降级
+      if ((risk > m_risk_warn * 1.2 || m_evidence > m_e_warn * 1.1) && mode_snapshot > 0) {
+        int target_mode = mode_snapshot - 1;
+        
+        if (risk > m_risk_err * 0.9 || m_evidence > m_e_err * 0.9 || hard_error) {
+          target_mode = 0;
+        }
+        
+        if (target_mode < m_mode) {
+          m_mode = target_mode;
+          ROS_WARN("Forced mode downgrade to %dD due to high risk/evidence: risk=%.2f, evidence=%.2f", 
+                  m_mode, risk, m_evidence);
+        }
+      }
+      
+      // 恢复逻辑：
+      if (risk < m_risk_clear * 0.7 && filtered_score > m_th_score_warn && mode_snapshot >= 2) {
+        m_recovery_count++;
+        
+        if (m_recovery_count >= 20) {
+          m_evidence *= 0.2;
+          // ROS_INFO_THROTTLE(1.0, "Strong recovery triggered: evidence *= 0.2 -> %.3f", m_evidence);
+          m_recovery_count = 0;
+        }
+      } else {
+        m_recovery_count = 0;
+      }
+      
       m_evidence += m_e_up * over - m_e_down * under;
       m_evidence = clamp01(m_evidence);
+                
+      // 重定位探测与快速恢复
+      if (mode_snapshot == 3 && m_mode < 2 && filtered_score > m_th_score_warn * 1.3) {
+        m_evidence *= 0.3;
+        ROS_WARN_THROTTLE(5.0, "Relocation detected: immediate recovery to evidence = %.3f", m_evidence);
+      }
     }
 
-    // 状态转换判定
     int level_val = 1; // 1=正常, 2=警告, 3=错误
     if (m_evidence >= m_e_err)      level_val = 3;
     else if (m_evidence >= m_e_warn) level_val = 2;
@@ -634,15 +907,27 @@ protected:
     filtered_msg.abnormal = (level_val != 1);
     filtered_msg.level = static_cast<uint8_t>(level_val);
 
-    // 格式化消息字符串
-    char buf2[160];
+    char buf2[256];
+    
+    char error_code = '0';
+    if (filtered_score < m_th_score_warn) error_code = 'S';            // Score
+    else if (filtered_uvw0 < m_th_uvw0_warn || filtered_uvw1 < m_th_uvw1_warn) error_code = 'G';  // Gradient
+    else if (filtered_stdxy > th_stdxy_warn_active) error_code = 'P';  // Position
+    else if (filtered_stdyaw > th_stdyaw_warn_active) error_code = 'Y'; // Yaw
+    
     if (level_val == 3) {
-      snprintf(buf2, sizeof(buf2), "[KF] 定位错误: risk=%.2f ev=%.2f (score=%.2f, uvw0=%.2f, uvw1=%.2f, std_xy=%.2f, std_yaw=%.2f)",
-               risk, m_evidence, filtered_score, filtered_uvw0, filtered_uvw1, filtered_stdxy, filtered_stdyaw);
+      snprintf(buf2, sizeof(buf2), 
+               "[KF] ERR(M%d|%c): r=%.2f e=%.2f (score=%.2f, uvw=[%.2f,%.2f], xy=%.2f/%.2f, yaw=%.2f/%.2f)",
+               mode_snapshot, error_code, risk, m_evidence, 
+               filtered_score, filtered_uvw0, filtered_uvw1, 
+               filtered_stdxy, th_stdxy_err_active, filtered_stdyaw, th_stdyaw_err_active);
       filtered_msg.message = std::string(buf2);
     } else if (level_val == 2) {
-      snprintf(buf2, sizeof(buf2), "[KF] 定位警告: risk=%.2f ev=%.2f (score=%.2f, uvw0=%.2f, uvw1=%.2f, std_xy=%.2f, std_yaw=%.2f)",
-               risk, m_evidence, filtered_score, filtered_uvw0, filtered_uvw1, filtered_stdxy, filtered_stdyaw);
+      snprintf(buf2, sizeof(buf2), 
+               "[KF] WARN(M%d|%c): r=%.2f e=%.2f (score=%.2f, uvw=[%.2f,%.2f], xy=%.2f/%.2f, yaw=%.2f/%.2f)",
+               mode_snapshot, error_code, risk, m_evidence, 
+               filtered_score, filtered_uvw0, filtered_uvw1, 
+               filtered_stdxy, th_stdxy_warn_active, filtered_stdyaw, th_stdyaw_warn_active);
       filtered_msg.message = std::string(buf2);
     } else {
       filtered_msg.message = "";
@@ -688,10 +973,10 @@ protected:
       tf::Transform map_pose;
       tf::poseMsgToTF(pose->pose.pose, map_pose);
 
-      ROS_INFO_STREAM("NeoLocalizationNode: Got new map pose estimate: x="
-                      << map_pose.getOrigin()[0]
-                      << " m, y=" << map_pose.getOrigin()[1] << " m, yaw="
-                      << tf::getYaw(map_pose.getRotation()) << " rad");
+      // ROS_INFO_STREAM("NeoLocalizationNode: Got new map pose estimate: x="
+      //                 << map_pose.getOrigin()[0]
+      //                 << " m, y=" << map_pose.getOrigin()[1] << " m, yaw="
+      //                 << tf::getYaw(map_pose.getRotation()) << " rad");
 
       tf::StampedTransform base_to_odom;
       try {
@@ -992,8 +1277,22 @@ private:
   double m_th_score_warn = 0.55, m_th_score_err = 0.25;
   double m_th_uvw0_warn = 0.25, m_th_uvw0_err = 0.10;
   double m_th_uvw1_warn = 0.20, m_th_uvw1_err = 0.08;
+  // 基础阈值
   double m_th_stdxy_warn = 0.20, m_th_stdxy_err = 0.30;
   double m_th_stdyaw_warn = 0.20, m_th_stdyaw_err = 0.30;
+  
+  // 模式特定阈值
+  double m_th_stdxy_warn_3d = 0.15, m_th_stdxy_err_3d = 0.25;  // 3D模式下更严格
+  double m_th_stdyaw_warn_3d = 0.15, m_th_stdyaw_err_3d = 0.25;
+  
+  double m_th_stdxy_warn_2d = 0.20, m_th_stdxy_err_2d = 0.30;  // 2D模式
+  double m_th_stdyaw_warn_2d = 0.18, m_th_stdyaw_err_2d = 0.28;
+  
+  double m_th_stdxy_warn_1d = 0.25, m_th_stdxy_err_1d = 0.35;  // 1D模式较宽松
+  double m_th_stdyaw_warn_1d = 0.25, m_th_stdyaw_err_1d = 0.35;
+  
+  double m_th_stdxy_warn_0d = 0.30, m_th_stdxy_err_0d = 0.40;  // 0D模式最宽松
+  double m_th_stdyaw_warn_0d = 0.30, m_th_stdyaw_err_0d = 0.40;
 
   // 指标权重与风险阈值
   double m_w_score = 0.6, m_w_uvw0 = 0.15, m_w_uvw1 = 0.15, m_w_stdxy = 0.05, m_w_stdyaw = 0.05;
@@ -1002,10 +1301,17 @@ private:
 
   // 证据积分状态与阈值
   double m_evidence = 0.0;   
-  double m_e_up = 0.25;      // 增长速率
+  double m_e_up = 0.15;      // 增长速率
   double m_e_down = 0.10;    // 衰减速率
   double m_e_warn = 0.30;     // WARN触发阈值
-  double m_e_err = 0.60;      // ERROR触发阈值
+  double m_e_err = 0.65;      // ERROR触发阈值
+  
+  // 模式稳定性相关
+  int m_mode = 0;                 // 当前模式状态(0D-3D)
+  int m_stable_mode_count = 0;    // 模式稳定计数器
+  int m_recovery_count = 0;       // 恢复计数器
+  int m_stable_mode_threshold = 3; // 模式稳定所需的连续帧数
+  double m_mode_hysteresis = 0.05; // 模式判断滞后阈值
 
   ros::Time m_offset_time;
   double m_offset_x = 0;  double m_offset_y = 0;  double m_offset_yaw = 0;  double m_sample_std_xy = 0;  double m_sample_std_yaw = 0;
