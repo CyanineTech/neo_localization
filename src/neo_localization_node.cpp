@@ -36,11 +36,11 @@ public:
   KalmanFilter(double q, double r, double init=0.0, double p0=1.0)
     : Q(q), R(r), X(init), P(p0), initialized(false), last_update_time(ros::Time(0)), outlier_threshold(5.0), min_P(1e-6) {}
 
-  // 设置过程噪声和观测噪声
+  // 设置滤波器噪声参数
   void setParams(double q, double r) { Q = q; R = r; }
-  // 设置异常观测抑制阈值（单位：sigma）
+  // 设置异常观测抑制阈值
   void setOutlierThreshold(double th) { outlier_threshold = th; }
-  // 设置最小协方差
+  // 设置最小协方差下限
   void setMinP(double p) { min_P = p; }
 
   // 滤波主入口
@@ -56,14 +56,14 @@ public:
     double dt = (stamp - last_update_time).toSec();
     last_update_time = stamp;
     double Q_eff = Q * (dt > 0.0 ? dt : 1.0);
-    // 预测
+    // 预测步骤
     P = P + Q_eff;
-    // 异常观测抑制
+    // 异常值检测
     double innovation = measurement - X;
     double S = P + R;
     double sigma = sqrt(S);
     if (fabs(innovation) > outlier_threshold * sigma) {
-      // 观测为离群点，直接返回预测值
+      // 异常值检测：超出阈值直接返回预测值
       return X;
     }
     // 更新
@@ -137,13 +137,12 @@ public:
     m_node_handle.param("max_sample_std_xy", m_max_sample_std_xy, 0.5);
     m_node_handle.param("max_sample_std_yaw", m_max_sample_std_yaw, 0.5);
     m_node_handle.param("constrain_threshold", m_constrain_threshold, 0.1);
-    m_node_handle.param("constrain_threshold_yaw", m_constrain_threshold_yaw,
-                        0.2);
+    m_node_handle.param("constrain_threshold_yaw", m_constrain_threshold_yaw, 0.13); 
     m_node_handle.param("loc_update_rate", m_loc_update_rate, 10.0);
     m_node_handle.param("map_update_rate", m_map_update_rate, 0.5);
     m_node_handle.param("transform_timeout", m_transform_timeout, 0.2);
 
-    // 风险评估参数
+    // 主要风险评估阈值
     m_node_handle.param("th_score_warn", m_th_score_warn, 0.55);
     m_node_handle.param("th_score_err", m_th_score_err, 0.25);
     m_node_handle.param("th_uvw0_warn", m_th_uvw0_warn, 0.25);
@@ -186,15 +185,15 @@ public:
     m_node_handle.param("risk_warn", m_risk_warn, 0.3);
     m_node_handle.param("risk_err", m_risk_err, 0.6);
 
-    // 证据积分参数
-    m_node_handle.param("evidence_up",   m_e_up,   0.15); // 风险高于warn时的增长速率
-    m_node_handle.param("evidence_down", m_e_down, 0.10); // 风险低于warn时的衰减速率
-    m_node_handle.param("evidence_warn", m_e_warn, 0.30);  // WARN阈值（证据）
-    m_node_handle.param("evidence_err",  m_e_err,  0.65);  // ERROR阈值（证据）
+    // 证据积分系统参数
+    m_node_handle.param("evidence_up",   m_e_up,   0.10); // 风险增长率
+    m_node_handle.param("evidence_down", m_e_down, 0.10); // 风险衰减率
+    m_node_handle.param("evidence_warn", m_e_warn, 0.30); // 警告阈值
+    m_node_handle.param("evidence_err",  m_e_err,  0.70); // 错误阈值
     
-    // 模式稳定性参数
-    m_node_handle.param("stable_mode_threshold", m_stable_mode_threshold, 3);  // 模式稳定所需的连续帧数
-    m_node_handle.param("mode_hysteresis", m_mode_hysteresis, 0.05);          // 模式判断滞后阈值
+    // 模式稳定性控制
+    m_node_handle.param("stable_mode_threshold", m_stable_mode_threshold, 2);  // 减少模式升级所需帧数
+    m_node_handle.param("mode_hysteresis", m_mode_hysteresis, 0.04);          // 降低滞后阈值
 
 		// Read initial pose parameters
     double initial_pose_x, initial_pose_y, initial_pose_a;
@@ -496,6 +495,13 @@ protected:
       }
 
       // 3. 应用滞后逻辑和稳定性判断
+      static int mode_downgrade_cooldown = 0; 
+      const int mode_downgrade_cooldown_threshold = 5; 
+      
+      if (mode_downgrade_cooldown > 0) {
+        mode_downgrade_cooldown--;
+      }
+
       if (potential_mode != m_mode) {
         if (potential_mode > m_mode) {
           bool strong_evidence = true;
@@ -525,28 +531,54 @@ protected:
           }
         }
         else {
-          bool weak_evidence = false;
-          
-          // 从不同当前模式降级的条件
-          if (m_mode == 3) {
-            weak_evidence = (grad_std_uvw[0] < m_constrain_threshold * (1.0 - m_mode_hysteresis)) || 
-                            (grad_std_uvw[1] < m_constrain_threshold * (1.0 - m_mode_hysteresis)) ||
-                            (best_score < m_min_score * 1.1);  
+          if (mode_downgrade_cooldown == 0) { 
+            bool weak_evidence = false;
+            
+            if (m_mode == 3) {
+              weak_evidence = (grad_std_uvw[0] < m_constrain_threshold * (1.0 - m_mode_hysteresis)) || 
+                              (grad_std_uvw[1] < m_constrain_threshold * (1.0 - m_mode_hysteresis)) ||
+                              (best_score < m_min_score * 1.1);
+                   if (grad_std_uvw[2] > m_constrain_threshold_yaw * 1.2) {
+            if (grad_std_uvw[0] > m_constrain_threshold) {
+              potential_mode = std::max(2, potential_mode);
+              weak_evidence = false;  
+              ROS_INFO("Keep 2D mode - strong X and Yaw");
+            } else if (best_score > m_min_score * 0.9) {
+              // 极度信任Yaw：当Yaw约束极好时限制模式降级
+              potential_mode = std::max(2, m_mode - 1);
+              weak_evidence = (m_mode > 3);  
+              ROS_INFO("Limited downgrade - strong Yaw");
+            }
           }
-          else if (m_mode == 2) {
-            weak_evidence = (grad_std_uvw[0] < m_constrain_threshold * (1.0 - m_mode_hysteresis)) || 
-                            (grad_std_uvw[2] < m_constrain_threshold_yaw * (1.0 - m_mode_hysteresis));
-          }
-          else if (m_mode == 1) {
-            weak_evidence = (grad_std_uvw[0] < m_constrain_threshold * (1.0 - m_mode_hysteresis));
-          }
-          
-          if (weak_evidence) {
-            m_stable_mode_count++;
-            if (m_stable_mode_count >= (m_stable_mode_threshold + 1)) {
-              new_mode = potential_mode;
-              m_stable_mode_count = 0;  
-              ROS_INFO("Mode downgraded: %d -> %d (weak evidence)", m_mode, new_mode);
+            }
+            else if (m_mode == 2) {
+              weak_evidence = (grad_std_uvw[0] < m_constrain_threshold * (1.0 - m_mode_hysteresis)) || 
+                              (grad_std_uvw[2] < m_constrain_threshold_yaw * (1.0 - m_mode_hysteresis));
+              
+              // 强化Yaw信任：降低维持2D模式的Yaw阈值，延长冷却时间
+              if ((grad_std_uvw[2] > m_constrain_threshold_yaw * 0.85) && (best_score > m_min_score * 0.8)) {
+                m_stable_mode_count = 0;  
+                weak_evidence = false;
+                ROS_INFO("Keep 2D mode - yaw strong (%.3f > %.3f)", 
+                         grad_std_uvw[2], m_constrain_threshold_yaw * 0.85);
+                
+                mode_downgrade_cooldown = std::max(mode_downgrade_cooldown, 15); 
+              }
+            }
+            else if (m_mode == 1) {
+              weak_evidence = (grad_std_uvw[0] < m_constrain_threshold * (1.0 - m_mode_hysteresis));
+            }
+            
+            if (weak_evidence) {
+              m_stable_mode_count++;
+              if (m_stable_mode_count >= (m_stable_mode_threshold + 2)) { 
+                new_mode = potential_mode;
+                m_stable_mode_count = 0;
+                mode_downgrade_cooldown = mode_downgrade_cooldown_threshold; 
+                ROS_INFO("Mode downgraded: %d -> %d (weak evidence)", m_mode, new_mode);
+              }
+            } else {
+              m_stable_mode_count = 0;
             }
           } else {
             m_stable_mode_count = 0;
@@ -556,17 +588,48 @@ protected:
         m_stable_mode_count = 0;
       }
 
+      // 低得分时的模式保持逻辑
       if (best_score < m_min_score * 0.8) {
-        new_mode = 0;
-        ROS_WARN_THROTTLE(1.0, "Emergency mode downgrade to 0D due to very low score: %.2f", best_score);
+        if (grad_std_uvw[2] > m_constrain_threshold_yaw * 0.75) {  
+          if (m_mode >= 2) {
+            new_mode = 2;  
+            ROS_WARN_THROTTLE(1.0, "Maintain 2D mode (%.2f), strong yaw: (%.3f)", best_score, grad_std_uvw[2]);
+            
+            mode_downgrade_cooldown = std::max(mode_downgrade_cooldown, 20);
+          } else if (grad_std_uvw[0] > m_constrain_threshold * 0.6) {
+            // X方向约束尚可，保持1D
+            new_mode = 1;
+            ROS_WARN_THROTTLE(1.0, "Maintain 1D mode (%.2f)", best_score);
+          } else {
+            // 即使降级到0D，仍极度信任yaw
+            new_mode = 0;
+            ROS_WARN_THROTTLE(1.0, "Mode 0D - maximum yaw trust, score: %.2f", best_score);
+          }
+        } else {
+          // yaw约束较弱但仍保持较高信任度
+          new_mode = 0;
+          ROS_WARN_THROTTLE(1.0, "Mode 0D - elevated yaw trust, score: %.2f", best_score);
+        }
       }
       
-      // 5. 处理从0D快速升级的情况
-      if (m_mode == 0 && best_score > m_min_score * 1.5 && 
-          grad_std_uvw[0] > m_constrain_threshold * 1.2 &&
-          grad_std_uvw[1] > m_constrain_threshold * 1.2) {
-        new_mode = 3;
-        ROS_INFO("Fast mode upgrade from 0D to 3D due to excellent conditions");
+      // 快速模式升级逻辑
+      if (m_mode == 0 && best_score > m_min_score * 1.2) { 
+        if (grad_std_uvw[0] > m_constrain_threshold * 1.1 &&
+            grad_std_uvw[1] > m_constrain_threshold * 1.1) {
+          new_mode = 3;
+          ROS_INFO("Rapid mode upgrade: 0D to 3D (score=%.2f, X=%.3f, Y=%.3f)", 
+                   best_score, grad_std_uvw[0], grad_std_uvw[1]);
+        } else if (grad_std_uvw[0] > m_constrain_threshold * 1.0 &&
+                   grad_std_uvw[2] > m_constrain_threshold_yaw * 1.0) {
+          // X和Yaw都良好时升级到2D
+          new_mode = 2;
+          ROS_INFO("Rapid mode upgrade: 0D to 2D (X=%.3f, Yaw=%.3f)", 
+                   grad_std_uvw[0], grad_std_uvw[2]);
+        } else if (grad_std_uvw[2] > m_constrain_threshold_yaw * 1.1) {
+          // 极度信任Yaw：当Yaw约束良好时直接升级到1D
+          new_mode = 1; 
+          ROS_INFO("Rapid mode upgrade: 0D to 1D (strong yaw=%.3f)", grad_std_uvw[2]);
+        }
       }
       
       int mode = new_mode;
@@ -586,8 +649,19 @@ protected:
           new_grid_x = grid_pose[0] + dist * grad_eigen_vectors[0][0];
           new_grid_y = grid_pose[1] + dist * grad_eigen_vectors[0][1];
         }
+        
         if (mode < 2) {
-          new_grid_yaw = grid_pose[2]; // keep old orientation
+          // 允许部分更新yaw，仅在低得分或极低yaw约束时完全保持旧方向
+          if (grad_std_uvw[2] > m_constrain_threshold_yaw * 0.5 && best_score > m_min_score * 0.6) {
+            // 仍有一定yaw约束时采用部分更新
+            const double yaw_blend = 0.3;  // 弱yaw约束时的部分更新率
+            new_grid_yaw = angles::normalize_angle(
+              grid_pose[2] + angles::shortest_angular_distance(grid_pose[2], best_yaw) * yaw_blend);
+            ROS_DEBUG_THROTTLE(1.0, "Partial yaw update in mode %d: %.3f -> %.3f", 
+                              mode, grid_pose[2], new_grid_yaw);
+          } else {
+            new_grid_yaw = grid_pose[2]; 
+          }
         }
 
         // use best sample for update
@@ -641,80 +715,121 @@ protected:
           break;
       }
 
-      // 基于模式和相应阈值更新粒子扩散
+      // 基于目标值和平滑率的统一扩散控制
+      static double target_std_xy = 0.0;
+      static double target_std_yaw = 0.0;
+      static int downgrade_cooldown = 0;
+      
+      if (downgrade_cooldown > 0) {
+        downgrade_cooldown--;
+      }
+      
+      // 根据当前模式计算目标扩散值
       switch(mode) {
         case 3: 
-          {
-
-            double confidence_factor = 1.2; 
-            m_sample_std_xy *= (1 - m_confidence_gain * confidence_factor);
-            m_sample_std_yaw *= (1 - m_confidence_gain * confidence_factor);
-            
-            double min_std_xy = th_stdxy_warn_active * 0.8;  
-            double min_std_yaw = th_stdyaw_warn_active * 0.8;
-            
-            m_sample_std_xy = fmin(fmax(m_sample_std_xy, min_std_xy), m_max_sample_std_xy);
-            m_sample_std_yaw = fmin(fmax(m_sample_std_yaw, min_std_yaw), m_max_sample_std_yaw);
-            
-            ROS_DEBUG_THROTTLE(2.0, "3D Diffusion limitation: std_xy=%.3f (min=%.3f, warn=%.3f), std_yaw=%.3f (min=%.3f, warn=%.3f)",
-                              m_sample_std_xy, min_std_xy, th_stdxy_warn_active,
-                              m_sample_std_yaw, min_std_yaw, th_stdyaw_warn_active);
-          }
+          target_std_xy = std::max(m_min_sample_std_xy, th_stdxy_warn_active * 0.65);
+          target_std_yaw = std::max(m_min_sample_std_yaw, th_stdyaw_warn_active * 0.15); 
           break;
           
-        case 2:  
-          {
-            double confidence_factor = 1.0;  
-            m_sample_std_xy *= (1 - m_confidence_gain * confidence_factor * 0.9); 
-            m_sample_std_yaw *= (1 - m_confidence_gain * confidence_factor);
-            
-            double min_std_xy = th_stdxy_warn_active * 0.85;
-            double min_std_yaw = th_stdyaw_warn_active * 0.85;
-            
-            m_sample_std_xy = fmin(fmax(m_sample_std_xy, min_std_xy), m_max_sample_std_xy);
-            m_sample_std_yaw = fmin(fmax(m_sample_std_yaw, min_std_yaw), m_max_sample_std_yaw);
-            
-            ROS_DEBUG_THROTTLE(2.0, "2D Diffusion limitation: std_xy=%.3f (min=%.3f, warn=%.3f), std_yaw=%.3f (min=%.3f, warn=%.3f)",
-                              m_sample_std_xy, min_std_xy, th_stdxy_warn_active,
-                              m_sample_std_yaw, min_std_yaw, th_stdyaw_warn_active);
-          }
+        case 2:
+          target_std_xy = std::max(m_min_sample_std_xy, th_stdxy_warn_active * 0.75);
+          target_std_yaw = std::max(m_min_sample_std_yaw, th_stdyaw_warn_active * 0.15); 
           break;
           
-        case 1:  
-          {
-            m_sample_std_xy *= (1 - m_confidence_gain * 0.7);  
-            m_sample_std_yaw += rad_rotated * m_odometry_std_yaw;  
-          
-            double min_std_xy = th_stdxy_warn_active * 0.9;  
-            double min_std_yaw = th_stdyaw_warn_active * 0.9;
-            
-            m_sample_std_xy = fmin(fmax(m_sample_std_xy, min_std_xy), m_max_sample_std_xy);
-            m_sample_std_yaw = fmin(fmax(m_sample_std_yaw, min_std_yaw), m_max_sample_std_yaw);
-            
-            ROS_DEBUG_THROTTLE(2.0, "1D Diffusion limitation: std_xy=%.3f (min=%.3f, warn=%.3f), std_yaw=%.3f (min=%.3f, warn=%.3f)",
-                              m_sample_std_xy, min_std_xy, th_stdxy_warn_active,
-                              m_sample_std_yaw, min_std_yaw, th_stdyaw_warn_active);
-          }
+        case 1:
+          target_std_xy = std::max(m_min_sample_std_xy, th_stdxy_warn_active * 0.8);
+          target_std_yaw = std::max(m_min_sample_std_yaw, th_stdyaw_warn_active * 0.15); 
           break;
           
-        case 0:  
+        case 0:
         default:
-          {
-            m_sample_std_xy += dist_moved * m_odometry_std_xy * 1.2;  
-            m_sample_std_yaw += rad_rotated * m_odometry_std_yaw * 1.2;
-            
-            double min_std_xy = th_stdxy_warn_active * 0.95;
-            double min_std_yaw = th_stdyaw_warn_active * 0.95;
-            
-            m_sample_std_xy = fmin(fmax(m_sample_std_xy, min_std_xy), m_max_sample_std_xy);
-            m_sample_std_yaw = fmin(fmax(m_sample_std_yaw, min_std_yaw), m_max_sample_std_yaw);
-            
-            ROS_DEBUG_THROTTLE(2.0, "0D Diffusion limitation: std_xy=%.3f (min=%.3f, warn=%.3f), std_yaw=%.3f (min=%.3f, warn=%.3f)",
-                              m_sample_std_xy, min_std_xy, th_stdxy_warn_active,
-                              m_sample_std_yaw, min_std_yaw, th_stdyaw_warn_active);
-          }
+          target_std_xy = std::max(m_min_sample_std_xy, th_stdxy_warn_active * 0.9);
+          target_std_yaw = std::max(m_min_sample_std_yaw, th_stdyaw_warn_active * 0.2); 
           break;
       }
+      
+      double odom_factor_xy = 0.0;
+      double odom_factor_yaw = 0.0;
+      
+      if (mode <= 1) {
+        // 低模式下，位置和yaw都受里程计影响极大
+        odom_factor_xy = mode == 0 ? 1.0 : 0.5; 
+        odom_factor_yaw = mode == 0 ? 1.0 : 0.9; 
+      } else {
+        odom_factor_xy = 0.0;
+        odom_factor_yaw = mode == 2 ? 0.7 : 0.5; 
+      }
+      
+      target_std_xy += dist_moved * m_odometry_std_xy * odom_factor_xy;
+      target_std_yaw += rad_rotated * m_odometry_std_yaw * odom_factor_yaw;
+      
+      // 限制最大目标值
+      target_std_xy = fmin(target_std_xy, m_max_sample_std_xy * 0.9);
+      target_std_yaw = fmin(target_std_yaw, m_max_sample_std_yaw * 0.9);
+      
+      double alpha_xy = 0.08;  
+      double alpha_yaw = 0.08;
+      if (best_score > 0.6) {  
+        alpha_xy = 0.12;
+        alpha_yaw = 0.12;
+      }
+      
+      // 针对增加和减少使用不同系数，防止震荡
+      double alpha_xy_up = 0.06;  
+      double alpha_xy_down = 0.12; 
+      
+      // yaw方向使用极度保守的参数，确保最稳定的yaw方向估计
+      double alpha_yaw_up = 0.02;   
+      double alpha_yaw_down = 0.15; 
+      
+      // 如果分数较高，可以更快速地收敛yaw方向（意味着更信任当前测量）
+      if (best_score > 0.6) {  
+        alpha_yaw_down = 0.2;  
+      }
+      
+      // 使用合适的系数计算增量
+      double delta_xy = 0.0;
+      if (target_std_xy > m_sample_std_xy) {
+        delta_xy = (target_std_xy - m_sample_std_xy) * alpha_xy_up;
+      } else {
+        delta_xy = (target_std_xy - m_sample_std_xy) * alpha_xy_down;
+      }
+      
+      double delta_yaw = 0.0;
+      if (target_std_yaw > m_sample_std_yaw) {
+        delta_yaw = (target_std_yaw - m_sample_std_yaw) * alpha_yaw_up;
+      } else {
+        delta_yaw = (target_std_yaw - m_sample_std_yaw) * alpha_yaw_down;
+      }
+      
+      // 单步方差变化限制
+      const double max_step_xy = 0.02;  // xy方向每步最大方差变化
+      const double max_step_yaw = 0.025; // yaw方向允许更大变化以加速收敛
+      
+      if (std::abs(delta_xy) > max_step_xy) {
+        delta_xy = delta_xy > 0 ? max_step_xy : -max_step_xy;
+      }
+      
+      if (std::abs(delta_yaw) > max_step_yaw) {
+        delta_yaw = delta_yaw > 0 ? max_step_yaw : -max_step_yaw;
+      }
+      
+      // 更新方差
+      m_sample_std_xy += delta_xy;
+      m_sample_std_yaw += delta_yaw;
+      
+      // 设置方差安全范围
+      double min_std_xy = std::max(m_min_sample_std_xy, th_stdxy_warn_active * 0.4);
+      // 极度信任yaw: 允许极低的yaw方差下限，特别是在模式0D和1D
+      double min_std_yaw = std::max(m_min_sample_std_yaw, 
+                                    mode <= 1 ? th_stdyaw_warn_active * 0.1 : th_stdyaw_warn_active * 0.15);
+      
+      m_sample_std_xy = fmin(fmax(m_sample_std_xy, min_std_xy), m_max_sample_std_xy);
+      m_sample_std_yaw = fmin(fmax(m_sample_std_yaw, min_std_yaw), m_max_sample_std_yaw);
+      
+      ROS_DEBUG_THROTTLE(2.0, "Spread control: mode=%d, std_xy=%.3f->%.3f (d=%.3f), std_yaw=%.3f->%.3f (d=%.3f)",
+                       mode, m_sample_std_xy, target_std_xy, delta_xy, 
+                       m_sample_std_yaw, target_std_yaw, delta_yaw);
 
       // publish new transform
       broadcast();
@@ -877,14 +992,17 @@ protected:
         }
       }
       
-      // 恢复逻辑：
-      if (risk < m_risk_clear * 0.7 && filtered_score > m_th_score_warn && mode_snapshot >= 2) {
-        m_recovery_count++;
-        
-        if (m_recovery_count >= 20) {
-          m_evidence *= 0.2;
-          // ROS_INFO_THROTTLE(1.0, "Strong recovery triggered: evidence *= 0.2 -> %.3f", m_evidence);
-          m_recovery_count = 0;
+      // 加强恢复能力
+      if (risk < m_risk_clear * 0.7 && filtered_score > m_th_score_warn) {
+        if (mode_snapshot >= 2 || grad_std_uvw_snapshot[2] > m_constrain_threshold_yaw * 1.1) {
+          // 良好的yaw约束也可触发快速恢复
+          m_recovery_count++;
+          
+          if (m_recovery_count >= 15) { // 缩短恢复所需帧数
+            m_evidence *= 0.15; // 更快的恢复速度
+            ROS_INFO_THROTTLE(2.0, "Strong recovery: evidence reduced to %.3f", m_evidence);
+            m_recovery_count = 0;
+          }
         }
       } else {
         m_recovery_count = 0;
@@ -893,10 +1011,12 @@ protected:
       m_evidence += m_e_up * over - m_e_down * under;
       m_evidence = clamp01(m_evidence);
                 
-      // 重定位探测与快速恢复
-      if (mode_snapshot == 3 && m_mode < 2 && filtered_score > m_th_score_warn * 1.3) {
-        m_evidence *= 0.3;
-        ROS_WARN_THROTTLE(5.0, "Relocation detected: immediate recovery to evidence = %.3f", m_evidence);
+      // 重定位与恢复
+      if ((mode_snapshot == 3 || (mode_snapshot == 2 && grad_std_uvw_snapshot[2] > m_constrain_threshold_yaw * 1.2))
+          && m_mode < 2 && filtered_score > m_th_score_warn * 1.2) {
+        // 强yaw约束的2D模式也能触发重定位检测
+        m_evidence *= 0.2; // 更快的恢复
+        ROS_WARN("Relocation detected: fast recovery to evidence = %.3f", m_evidence);
       }
     }
 
@@ -1281,18 +1401,18 @@ private:
   double m_th_stdxy_warn = 0.20, m_th_stdxy_err = 0.30;
   double m_th_stdyaw_warn = 0.20, m_th_stdyaw_err = 0.30;
   
-  // 模式特定阈值
-  double m_th_stdxy_warn_3d = 0.15, m_th_stdxy_err_3d = 0.25;  // 3D模式下更严格
-  double m_th_stdyaw_warn_3d = 0.15, m_th_stdyaw_err_3d = 0.25;
+  // 模式特定阈值 - 调整以避免0.25附近的抖动
+  double m_th_stdxy_warn_3d = 0.15, m_th_stdxy_err_3d = 0.27;  // 3D模式下严格
+  double m_th_stdyaw_warn_3d = 0.15, m_th_stdyaw_err_3d = 0.27;
   
-  double m_th_stdxy_warn_2d = 0.20, m_th_stdxy_err_2d = 0.30;  // 2D模式
+  double m_th_stdxy_warn_2d = 0.19, m_th_stdxy_err_2d = 0.29;  // 2D模式
   double m_th_stdyaw_warn_2d = 0.18, m_th_stdyaw_err_2d = 0.28;
   
-  double m_th_stdxy_warn_1d = 0.25, m_th_stdxy_err_1d = 0.35;  // 1D模式较宽松
-  double m_th_stdyaw_warn_1d = 0.25, m_th_stdyaw_err_1d = 0.35;
+  double m_th_stdxy_warn_1d = 0.235, m_th_stdxy_err_1d = 0.34;  // 1D模式 - 避开0.25临界点
+  double m_th_stdyaw_warn_1d = 0.235, m_th_stdyaw_err_1d = 0.34;
   
-  double m_th_stdxy_warn_0d = 0.30, m_th_stdxy_err_0d = 0.40;  // 0D模式最宽松
-  double m_th_stdyaw_warn_0d = 0.30, m_th_stdyaw_err_0d = 0.40;
+  double m_th_stdxy_warn_0d = 0.32, m_th_stdxy_err_0d = 0.42;  // 0D模式最宽松
+  double m_th_stdyaw_warn_0d = 0.32, m_th_stdyaw_err_0d = 0.42;
 
   // 指标权重与风险阈值
   double m_w_score = 0.6, m_w_uvw0 = 0.15, m_w_uvw1 = 0.15, m_w_stdxy = 0.05, m_w_stdyaw = 0.05;
