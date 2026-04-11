@@ -109,7 +109,10 @@ public:
         kf_uvw0(0.001, 0.01, 0.4),
         kf_uvw1(0.001, 0.01, 0.25),
         kf_stdxy(0.0001, 0.001, 0.025),
-        kf_stdyaw(0.0001, 0.001, 0.025)
+        kf_stdyaw(0.0001, 0.001, 0.025),
+        kf_innov_x(0.0005, 0.005, 0.0),
+        kf_innov_y(0.0005, 0.005, 0.0),
+        kf_innov_yaw(0.0001, 0.001, 0.0)
   {
     m_node_handle.param("broadcast_tf", m_broadcast_tf, true);
 
@@ -412,6 +415,11 @@ protected:
       }
     }
 
+    // innovation: 扫描匹配想要的修正量 (低通更新前的原始偏差)
+    double innov_x = 0.0;
+    double innov_y = 0.0;
+    double innov_yaw = 0.0;
+
     if (mode > 0) {
       double new_grid_x = best_x;
       double new_grid_y = best_y;
@@ -440,12 +448,15 @@ protected:
            Matrix<double, 4, 1>{0, 0, 0, 1})
               .project();
 
+      // 计算创新量: 扫描匹配结果与当前 offset 的差
+      innov_x = new_offset[0] - m_offset_x;
+      innov_y = new_offset[1] - m_offset_y;
+      innov_yaw = angles::shortest_angular_distance(m_offset_yaw, new_offset[2]);
+
       // apply new offset with an exponential low pass filter
-      m_offset_x += (new_offset[0] - m_offset_x) * m_update_gain;
-      m_offset_y += (new_offset[1] - m_offset_y) * m_update_gain;
-      m_offset_yaw +=
-          angles::shortest_angular_distance(m_offset_yaw, new_offset[2]) *
-          m_update_gain;
+      m_offset_x += innov_x * m_update_gain;
+      m_offset_y += innov_y * m_update_gain;
+      m_offset_yaw += innov_yaw * m_update_gain;
     }
     m_offset_time = base_to_odom.stamp_;
 
@@ -520,6 +531,9 @@ protected:
     double filtered_uvw1 = kf_uvw1.update(grad_std_uvw[1]);
     double filtered_stdxy = kf_stdxy.update(m_sample_std_xy);
     double filtered_stdyaw = kf_stdyaw.update(m_sample_std_yaw);
+    double filtered_innov_x = kf_innov_x.update(innov_x);
+    double filtered_innov_y = kf_innov_y.update(innov_y);
+    double filtered_innov_yaw = kf_innov_yaw.update(innov_yaw);
 
     // 发布自定义消息（原始）
     neo_localization::LocalizationStats stats_msg;
@@ -529,6 +543,9 @@ protected:
     stats_msg.grad_uvw[0] = grad_std_uvw[0];
     stats_msg.grad_uvw[1] = grad_std_uvw[1];
     stats_msg.grad_uvw[2] = grad_std_uvw[2];
+    stats_msg.innovation[0] = innov_x;
+    stats_msg.innovation[1] = innov_y;
+    stats_msg.innovation[2] = innov_yaw;
     stats_msg.std_xy = m_sample_std_xy;
     stats_msg.std_yaw = m_sample_std_yaw;
     stats_msg.mode = mode;
@@ -539,14 +556,13 @@ protected:
     filtered_msg.score = filtered_score;
     filtered_msg.grad_uvw[0] = filtered_uvw0;
     filtered_msg.grad_uvw[1] = filtered_uvw1;
+    filtered_msg.innovation[0] = filtered_innov_x;
+    filtered_msg.innovation[1] = filtered_innov_y;
+    filtered_msg.innovation[2] = filtered_innov_yaw;
     filtered_msg.std_xy = filtered_stdxy;
     filtered_msg.std_yaw = filtered_stdyaw;
     m_pub_stats_filtered.publish(filtered_msg);
 
-    // 优化异常检测逻辑
-    if(filtered_score < 0.4 || filtered_uvw0 < 0.2 || filtered_uvw1 < 0.1) {
-      ROS_WARN_THROTTLE(5.0, "[KF] 定位异常: score=%.2f, uvw0=%.2f, uvw1=%.2f", filtered_score, filtered_uvw0, filtered_uvw1);
-    }
   }
 
   /*
@@ -876,6 +892,9 @@ private:
   KalmanFilter kf_uvw1;
   KalmanFilter kf_stdxy;
   KalmanFilter kf_stdyaw;
+  KalmanFilter kf_innov_x;
+  KalmanFilter kf_innov_y;
+  KalmanFilter kf_innov_yaw;
 };
 
 int main(int argc, char **argv) {
